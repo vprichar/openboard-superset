@@ -12,6 +12,21 @@ falló. De un vistazo sabes qué sesión te necesita, y con una tecla saltas a e
   <img src="docs/teclado/capturas/pad/foto-pad-real.png" alt="El teclado iluminado" width="340">
 </p>
 
+## ¿Tienes este teclado?
+
+Este fork es para el macro pad que se vende en AliExpress como mini teclado mecánico
+Bluetooth/USB con batería, clon del Codex Micro:
+**[AliExpress · artículo 1005012978606959](https://es.aliexpress.com/item/1005012978606959.html)**.
+
+Cómo reconocerlo:
+- En la placa dice **«XiaMi Lab | AI Micro»** y **«Let's build»**.
+- En macOS aparece como **«Project2077»** del fabricante «CodexMicro», USB `303A:8360`.
+- 16 posiciones: dial plateado, joystick, 6 teclas de sesión translúcidas, las tapas FAST, APPR,
+  REJ, BRANCH, MIC, NEW y CODEX, y 3 LED de estado junto a un círculo.
+
+Si el tuyo coincide, OpenBoard original no lo reconoce bien (manda los eventos en otro formato);
+este fork sí.
+
 ## Qué añade este fork
 
 ### Soporte para el clon
