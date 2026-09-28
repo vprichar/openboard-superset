@@ -205,8 +205,11 @@ enum Actions {
     }
 
     /// Hold or release any chord. Everything said of `holdSpace` applies.
+    ///
+    /// `autorepeat` marks a keyDown as the key's own repeat, as hardware autorepeat
+    /// does — see `HoldRepeat` for why a held dictation key has to send them.
     @discardableResult
-    static func hold(_ shortcut: Shortcut, down: Bool) -> Result {
+    static func hold(_ shortcut: Shortcut, down: Bool, autorepeat: Bool = false) -> Result {
         guard let event = CGEvent(
             keyboardEventSource: nil,
             virtualKey: CGKeyCode(shortcut.keyCode),
@@ -215,6 +218,9 @@ enum Actions {
             return Result(ok: false, detail: "could not create a key event")
         }
         event.flags = flags(for: shortcut)
+        if down && autorepeat {
+            event.setIntegerValueField(.keyboardEventAutorepeat, value: 1)
+        }
         event.post(tap: .cghidEventTap)
         return Result(ok: true, detail: "")
     }
@@ -326,7 +332,9 @@ enum Actions {
        failure.
      */
     static func respond(_ decision: Decision, slots: [SlotView]) -> RespondOutcome {
-        let pending = slots.filter { $0.state?.isAttention == true }
+        // A restored, unconfirmed prompt is what the file said before a restart — it
+        // may have been answered since. ⏎ into it would answer something unseen (F1).
+        let pending = slots.filter { $0.state?.isAttention == true && !$0.isUnconfirmed }
         guard !pending.isEmpty else { return .nothingPending }
         guard pending.count == 1 else {
             return .ambiguous(slots: pending.map(\.slot))
@@ -402,6 +410,13 @@ enum Actions {
        reason the check exists.
      */
     private static func hasLanded(_ target: SlotView) -> Bool {
+        if target.supersetWorkspaceID != nil {
+            // Superset exposes no way to ask which terminal it has focused, but the
+            // deep link selects the exact terminal, so Superset being the frontmost app
+            // is the evidence available that the keystroke lands in that session.
+            return NSWorkspace.shared.frontmostApplication?.bundleIdentifier == Focus.supersetBundleID
+        }
+
         if target.origin == .cmux {
             /*
              Two conditions, and the first one is the one that matters.

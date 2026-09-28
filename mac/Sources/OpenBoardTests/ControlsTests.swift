@@ -171,16 +171,15 @@ func runHoldTests() {
         )
     }
 
-    test("a wide keycap's release reports the owning key") {
-        // ACT10 and ACT11 are one cap. If the release came back as ACT11 the hold
-        // would never end, because the binding lives on ACT10.
-        var dispatcher = KeyDispatcher(actions: ["ACT10": .voiceTalk])
-        _ = dispatcher.intent(for: KeyEvent(key: "ACT10", action: .down), now: t0)
+    test("ACT11's release reports ACT11 on the clone") {
+        // Separate caps: a hold bound to ACT11 must end on ACT11's own release.
+        var dispatcher = KeyDispatcher(actions: ["ACT11": .voiceTalk])
+        _ = dispatcher.intent(for: KeyEvent(key: "ACT11", action: .down), now: t0)
         expectEqual(
             dispatcher.intent(
                 for: KeyEvent(key: "ACT11", action: .up), now: t0.addingTimeInterval(0.5)
             ),
-            .release(key: "ACT10")
+            .release(key: "ACT11")
         )
     }
 

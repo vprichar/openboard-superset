@@ -48,6 +48,8 @@ public struct Harness: Sendable, Identifiable, Equatable {
     public let events: [(name: String, matcher: String?)]
     /// What this harness cannot do, in its own terms. Shown beside it, because a
     /// missing state is not a detail — it is a color that will never appear.
+    /// Spanish keys into `UIStrings`, translated where shown — this catalog is built
+    /// once, so it must not resolve a language itself.
     public let limitations: [String]
     /**
      How its hooks are wired, and whether OpenBoard can do it.
@@ -158,62 +160,51 @@ extension Harness {
             Surface(
                 id: "terminal",
                 name: "Terminal",
-                detection: "The owning process, and the session's tty captured from it "
-                    + "at claim time.",
-                jump: "Matched against Terminal's per-tab tty — the exact tab, not the window.",
+                detection: "El proceso propietario, y el tty de la sesión tomado de él al asignarle la tecla.",
+                jump: "Se compara con el tty de cada pestaña de Terminal — la pestaña exacta, no la ventana.",
                 host: .terminal
             ),
             Surface(
                 id: "iterm2",
                 name: "iTerm2",
-                detection: "The owning process. A tty alone cannot tell iTerm2 from "
-                    + "Terminal — both allocate a real one.",
-                jump: "Matched against iTerm2's per-session tty, one level deeper than "
-                    + "Terminal: the exact split, not just the tab.",
+                detection: "El proceso propietario. Un tty por sí solo no distingue iTerm2 de Terminal — ambos asignan uno real.",
+                jump: "Se compara con el tty de cada sesión de iTerm2, un nivel más fino que Terminal: la división exacta, no solo la pestaña.",
                 host: .iterm2
             ),
             Surface(
                 id: "cmux",
                 name: "cmux",
-                detection: "The owning process. cmux then names the surface the "
-                    + "session's pid is running in.",
-                jump: "The surface, by id, over cmux's own socket — the exact tab or "
-                    + "split, switching workspace if it is in another one. No "
-                    + "Automation grant needed.",
+                detection: "El proceso propietario. Después cmux indica la superficie en la que corre el pid de la sesión.",
+                jump: "La superficie, por id, a través del socket de cmux — la pestaña o división exacta, cambiando de espacio de trabajo si está en otro. No hace falta el permiso de Automatización.",
                 host: .cmux
             ),
             Surface(
                 id: "vscode",
                 name: "VS Code",
-                detection: "Entry point `claude-vscode`, or the owning process when a "
-                    + "session runs in the integrated terminal.",
-                jump: "`code -r` on the workspace folder: the right window, not the "
-                    + "specific panel.",
+                detection: "Punto de entrada `claude-vscode`, o el proceso propietario cuando la sesión corre en la terminal integrada.",
+                jump: "`code -r` sobre la carpeta del proyecto: la ventana correcta, no el panel concreto.",
                 host: .vscode
             ),
             Surface(
                 id: "subagent",
-                name: "Subagents",
-                detection: "`CLAUDE_AGENT_ID`, or an agent type in the payload.",
+                name: "Subagentes",
+                detection: "`CLAUDE_AGENT_ID`, o un tipo de agente en el payload.",
                 jump: "—",
-                unsupported: "Never given a key, by design: one parallel fan-out would "
-                    + "take all six at once."
+                unsupported: "Nunca reciben tecla, a propósito: un solo reparto en paralelo ocuparía las seis a la vez."
             ),
             Surface(
                 id: "sdk",
-                name: "Embedded SDK clients",
+                name: "Clientes SDK integrados",
                 detection: "`CLAUDE_AGENT_SDK_CLIENT_APP`.",
                 jump: "—",
-                unsupported: "Other tools spawn `claude` of their own accord — ten were "
-                    + "seen running under one unrelated extension."
+                unsupported: "Otras herramientas lanzan `claude` por su cuenta — se vieron diez corriendo bajo una sola extensión ajena."
             ),
             Surface(
                 id: "remote",
-                name: "claude.ai, cloud, SSH",
+                name: "claude.ai, nube, SSH",
                 detection: "—",
                 jump: "—",
-                unsupported: "Unreachable: hooks run in the session's own process, and "
-                    + "only a local one can talk to the pad."
+                unsupported: "Inalcanzable: los hooks corren en el propio proceso de la sesión, y solo uno local puede hablar con el pad."
             ),
         ],
         limitations: [],
@@ -255,29 +246,26 @@ extension Harness {
             Surface(
                 id: "terminal",
                 name: "Terminal",
-                detection: "`cwd` and `session_id` from the hook payload.",
-                jump: "The owning process's tty, when the session was started from one."
+                detection: "`cwd` y `session_id` del payload del hook.",
+                jump: "El tty del proceso propietario, si la sesión se inició desde uno."
             ),
             Surface(
                 id: "subagent",
-                name: "Subagents",
-                detection: "`subagent_start` and `subagent_stop`.",
+                name: "Subagentes",
+                detection: "`subagent_start` y `subagent_stop`.",
                 jump: "—",
-                unsupported: "Not wired, and would not take a key if it were — six keys "
-                    + "is a scarce budget."
+                unsupported: "Sin conectar, y aunque lo estuvieran no recibirían tecla — seis teclas son un recurso escaso."
             ),
             Surface(
                 id: "gateway",
-                name: "Gateway sessions",
+                name: "Sesiones de gateway",
                 detection: "—",
                 jump: "—",
-                unsupported: "A gateway run is not a terminal you can be sent to, and "
-                    + "may not be on this machine at all."
+                unsupported: "Una ejecución de gateway no es una terminal a la que se te pueda llevar, y puede que ni siquiera esté en este Mac."
             ),
         ],
         limitations: [
-            "No completion event: nothing in its shell hooks means \"this turn ended\", "
-                + "so a Hermes key never turns green.",
+            "Sin evento de finalización: nada en sus hooks de shell significa \"este turno terminó\", así que una tecla de Hermes nunca se pone verde.",
         ],
         setup: .manual(
             path: "~/.hermes/config.yaml",
@@ -332,23 +320,20 @@ extension Harness {
             Surface(
                 id: "terminal",
                 name: "Terminal",
-                detection: "`session_id` and `cwd`, forwarded by the extension.",
-                jump: "The owning process's tty, when the session was started from one."
+                detection: "`session_id` y `cwd`, reenviados por la extensión.",
+                jump: "El tty del proceso propietario, si la sesión se inició desde uno."
             ),
             Surface(
                 id: "sdk",
-                name: "Embedded and RPC modes",
+                name: "Modos integrado y RPC",
                 detection: "—",
                 jump: "—",
-                unsupported: "Pi embeds in other apps. Those sessions are not something "
-                    + "a key can raise."
+                unsupported: "Pi se integra en otras apps. Esas sesiones no son algo que una tecla pueda traer al frente."
             ),
         ],
         limitations: [
-            "No approval event is documented, so a Pi key never turns orange — the one "
-                + "state this board exists for.",
-            "In-process extensions only, so setup is a file you add rather than a "
-                + "command OpenBoard can install.",
+            "No hay un evento de aprobación documentado, así que una tecla de Pi nunca se pone naranja — justo el estado para el que existe este tablero.",
+            "Solo admite extensiones dentro del proceso, así que la configuración es un archivo que añades tú, no un comando que OpenBoard pueda instalar.",
         ],
         setup: .manual(
             path: "~/.pi/agent/extensions/openboard.ts",

@@ -288,6 +288,14 @@ public final class VirtualPad: PadTransport, @unchecked Sendable {
         emit("{\"m\":\"v.oai.hid\",\"p\":{\"k\":\"\(clockwise ? "ENC_CW" : "ENC_CC")\",\"act\":2}}")
     }
 
+    /// One push of the stick at `angle` (0…1 round the rim), then back to rest. The
+    /// hardware streams samples; one at full deflection and the `{a:0,d:0}` release
+    /// are what `Joystick.update` needs to see exactly one push.
+    public func pushStick(angle: Double) {
+        emit("{\"m\":\"v.oai.rad\",\"p\":{\"a\":\(angle),\"d\":1}}")
+        emit("{\"m\":\"v.oai.rad\",\"p\":{\"a\":0,\"d\":0}}")
+    }
+
     private func emit(_ line: String) {
         lock.lock()
         let handler = self.handler

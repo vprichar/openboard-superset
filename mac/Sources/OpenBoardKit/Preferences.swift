@@ -25,6 +25,15 @@ import Foundation
  strings are accepted too, because they are what a person types when hand-editing, and
  numbers are written back so the file stays readable by either implementation.
  */
+/// Which sessions the six keys show while Superset is in front.
+public enum PadScope: String, Equatable, Sendable, CaseIterable {
+    /// Only the workspace you are looking at, plus a borrowed key for anything urgent
+    /// elsewhere. See `PadView`.
+    case focusedWorkspace
+    /// Every session on its registry slot — the board before workspaces.
+    case all
+}
+
 public struct Preferences: Equatable, Sendable {
     public var states: [String: Appearance]
     /// Action key bindings. A key present with `nil` is *explicitly* unassigned, which
@@ -102,6 +111,41 @@ public struct Preferences: Equatable, Sendable {
     /// a bound chord types nothing, ever. Off by default because it only works once
     /// the chord is added to `~/.claude/keybindings.json`.
     public var voiceChord: Bool
+    /// Default `focusedWorkspace`. Outside Superset it changes nothing: any other
+    /// surface in front shows every session, exactly as before.
+    public var padScope: PadScope
+    /// The light a workspace switch plays. See `TransitionPlanner`.
+    public var workspaceTransition: WorkspaceTransition
+    /// Each workspace's transient color. See `WorkspaceColors`.
+    public var workspaceIdentity: WorkspaceIdentity
+    /// How the borrowed key looks. See `OverflowLook`.
+    public var overflow: Overflow
+    /// The host-service connection (F3).
+    public var superset: Superset
+    /**
+     Per-app overrides, by bundle id of the app in front (F2).
+
+     Only what a profile names is overridden; everything else inherits the base
+     bindings. Their chords live in `shortcuts` under `<key>@<bundle>`.
+     */
+    public var profiles: [String: AppProfile]
+    /// What holding an action cap does, keyed like `actionKeys`. Present with `nil` is
+    /// explicitly unassigned; absent inherits the default.
+    public var actionKeysLong: [String: KeyAction?]
+    /// How long is "held" for an action cap, in milliseconds.
+    public var actionLongPressMs: Int
+    /// The two-step confirmation window and its light (F4).
+    public var confirm: Confirm
+    /// Remote sends and interrupts aimed at one agent (F7).
+    public var targeted: Targeted
+    /// Which agents NEW and the handoff start (F5, F8).
+    public var launch: Launch
+    /// Let a snippet through even when it looks like a destructive command. Off: the
+    /// key that typed `/clear` into the wrong window is why.
+    public var snippetsAllowDangerous: Bool
+    /// Themes the user saved, duplicated or imported, in the order they were added.
+    /// Absent in the file means none. See `CustomTheme` and `ThemeFile`.
+    public var customThemes: [CustomTheme]
 
     public struct Encoder: Equatable, Sendable {
         /// `scroll-up` or `scroll-down`, per direction.
@@ -219,6 +263,295 @@ public struct Preferences: Equatable, Sendable {
         }
     }
 
+    /**
+     The light a Superset workspace switch plays: a sweep on the ring and the keys
+     lighting one after another, so the count reads without reading anything.
+
+     An event, not a state — nothing here holds a light after the transition ends. The
+     timings are the design (`docs`: "Barrido + recuento"), kept as settings because the
+     ring speed in particular still has to be calibrated on the pad.
+     */
+    public struct WorkspaceTransition: Equatable, Sendable {
+        public enum Style: String, Equatable, Sendable, CaseIterable {
+            /// The ring sweeps once and the keys count up.
+            case sweepCascade = "sweep-cascade"
+            /// Every key at once, the ring a brief solid in the workspace color.
+            case cut
+            /// One write, nothing on the ring.
+            case off
+        }
+
+        public var style: Style
+        /// Honor macOS's Reduce Motion: a switch then paints directly, like `off`.
+        public var respectReduceMotion: Bool
+        /// A switch superseded within this long plays nothing — cycling through
+        /// workspaces with the shortcut only animates where you stop.
+        public var debounceMs: Int
+        /// A switch this soon after the last transition paints directly.
+        public var rapidWindowMs: Int
+        public var keyStaggerMs: Int
+        public var firstKeyDelayMs: Int
+        public var overflowDelayMs: Int
+        public var ringSweep: Bool
+        /// Calibrate on the pad: the target is about one lap in `ringHoldMs`.
+        public var ringSpeed: Double
+        public var ringBrightness: Double
+        public var ringHoldMs: Int
+        public var ringFadeSteps: Int
+        public var ringFadeStepMs: Int
+        /// The keys still count up inside this window; only the ring sits it out.
+        public var minSweepIntervalMs: Int
+
+        public init(
+            style: Style = .sweepCascade,
+            respectReduceMotion: Bool = true,
+            debounceMs: Int = 150,
+            rapidWindowMs: Int = 1500,
+            keyStaggerMs: Int = 70,
+            firstKeyDelayMs: Int = 80,
+            overflowDelayMs: Int = 150,
+            ringSweep: Bool = true,
+            ringSpeed: Double = 0.55,
+            ringBrightness: Double = 0.8,
+            ringHoldMs: Int = 900,
+            ringFadeSteps: Int = 8,
+            ringFadeStepMs: Int = 60,
+            minSweepIntervalMs: Int = 4000
+        ) {
+            self.style = style
+            self.respectReduceMotion = respectReduceMotion
+            self.debounceMs = debounceMs
+            self.rapidWindowMs = rapidWindowMs
+            self.keyStaggerMs = keyStaggerMs
+            self.firstKeyDelayMs = firstKeyDelayMs
+            self.overflowDelayMs = overflowDelayMs
+            self.ringSweep = ringSweep
+            self.ringSpeed = ringSpeed
+            self.ringBrightness = ringBrightness
+            self.ringHoldMs = ringHoldMs
+            self.ringFadeSteps = ringFadeSteps
+            self.ringFadeStepMs = ringFadeStepMs
+            self.minSweepIntervalMs = minSweepIntervalMs
+        }
+    }
+
+    /**
+     A color per workspace, shown only in passing — the sweep and the borrowed key's
+     wink, never held on a key.
+
+     The palette keeps its distance from every state hue: a hash landing on orange
+     would read as a prompt. See `WorkspaceColors`.
+     */
+    public struct WorkspaceIdentity: Equatable, Sendable {
+        public static let defaultPalette: [RGB] = [
+            RGB(0x9B30FF), // violet
+            RGB(0x00C9A7), // turquoise
+            RGB(0xB4E600), // lime
+            RGB(0xD6E4FF), // cool white
+        ]
+
+        public var palette: [RGB]
+        /// Workspace id → color, chosen by hand. Wins over the palette.
+        public var colors: [String: RGB]
+
+        public init(palette: [RGB] = defaultPalette, colors: [String: RGB] = [:]) {
+            self.palette = palette
+            self.colors = colors
+        }
+    }
+
+    /// The key lent to another workspace's urgent session. Still, where every local
+    /// key breathes: here "still" means "not from here".
+    public struct Overflow: Equatable, Sendable {
+        public var enabled: Bool
+        public var effect: LEDEffect
+        public var brightness: Double
+        public var winkEveryMs: Int
+        public var winkMs: Int
+        /// Flash the origin workspace's color now and then, so the key says where.
+        public var winkOriginColor: Bool
+
+        public init(
+            enabled: Bool = true,
+            effect: LEDEffect = .solid,
+            brightness: Double = 0.6,
+            winkEveryMs: Int = 3000,
+            winkMs: Int = 250,
+            winkOriginColor: Bool = true
+        ) {
+            self.enabled = enabled
+            self.effect = effect
+            self.brightness = brightness
+            self.winkEveryMs = winkEveryMs
+            self.winkMs = winkMs
+            self.winkOriginColor = winkOriginColor
+        }
+    }
+
+    /// The host-service client. Defaults: Plan §2.5; D8 for the mismatch policy.
+    public struct Superset: Equatable, Sendable {
+        public enum HostClient: String, Equatable, Sendable, CaseIterable {
+            /// Use the host-service whenever a manifest is found.
+            case auto
+            /// Hooks and deep links only, as before F3.
+            case off
+        }
+
+        /// What a Superset version other than the tested one gets.
+        public enum MismatchPolicy: String, Equatable, Sendable, CaseIterable {
+            /// Queries only, until someone has looked. D8.
+            case readOnly = "read-only"
+            case full
+        }
+
+        public var hostClient: HostClient
+        /// `nil` means the one org under `~/.superset/host` with a manifest. Only the
+        /// id is ever stored here — never the token.
+        public var orgID: String?
+        public var testedVersion: String
+        public var onVersionMismatch: MismatchPolicy
+        /// Subscribe to `/events`.
+        public var events: Bool
+        /// `Start` arrives on every tool use; this groups them.
+        public var startDebounceMs: Int
+        /// The same event from our hook and from the bus counts once inside this.
+        public var dedupeWindowMs: Int
+        /// At most one pad write per window.
+        public var padWriteCoalesceMs: Int
+        public var reconcileOnLaunch: Bool
+
+        public init(
+            hostClient: HostClient = .auto,
+            orgID: String? = nil,
+            testedVersion: String = "1.30.0",
+            onVersionMismatch: MismatchPolicy = .readOnly,
+            events: Bool = true,
+            startDebounceMs: Int = 200,
+            dedupeWindowMs: Int = 1500,
+            padWriteCoalesceMs: Int = 90,
+            reconcileOnLaunch: Bool = true
+        ) {
+            self.hostClient = hostClient
+            self.orgID = orgID
+            self.testedVersion = testedVersion
+            self.onVersionMismatch = onVersionMismatch
+            self.events = events
+            self.startDebounceMs = startDebounceMs
+            self.dedupeWindowMs = dedupeWindowMs
+            self.padWriteCoalesceMs = padWriteCoalesceMs
+            self.reconcileOnLaunch = reconcileOnLaunch
+        }
+    }
+
+    /**
+     One app's overrides.
+
+     Three levels of "nothing", and all three mean something: a direction absent from
+     `joystick` inherits the base binding, one present with `nil` is explicitly
+     unbound in this app, and one present with an action overrides. `encoderLongPress`
+     is the same thing for a single value, hence the double optional.
+     */
+    public struct AppProfile: Equatable, Sendable {
+        public var joystick: [OpenBoardKit.Joystick.Direction: KeyAction?]
+        public var encoderLongPress: KeyAction??
+        public var actionKeysLong: [String: KeyAction?]
+
+        public init(
+            joystick: [OpenBoardKit.Joystick.Direction: KeyAction?] = [:],
+            encoderLongPress: KeyAction?? = nil,
+            actionKeysLong: [String: KeyAction?] = [:]
+        ) {
+            self.joystick = joystick
+            self.encoderLongPress = encoderLongPress
+            self.actionKeysLong = actionKeysLong
+        }
+    }
+
+    /// The "are you sure?" light. White, not amber: amber already means a session is
+    /// waiting on you (D3).
+    public struct Confirm: Equatable, Sendable {
+        public var windowMs: Int
+        public var color: RGB
+        public var effect: LEDEffect
+        public var brightness: Double
+
+        public init(
+            windowMs: Int = 3000,
+            color: RGB = RGB(0xFFFFFF),
+            effect: LEDEffect = .breath,
+            brightness: Double = 0.8
+        ) {
+            self.windowMs = windowMs
+            self.color = color
+            self.effect = effect
+            self.brightness = brightness
+        }
+    }
+
+    public struct Targeted: Equatable, Sendable {
+        /// How a remote send is aimed. D10.
+        public enum Mode: String, Equatable, Sendable, CaseIterable {
+            /// FAST held arms it, REJ turns it into an interrupt, an agent key fires it
+            /// without jumping.
+            case armed
+            /// Hold an agent key and press REJ or FAST. Delays every jump to the
+            /// release, so it is not the default.
+            case chord
+        }
+
+        public var mode: Mode
+        /// How long an armed send waits for its agent key.
+        public var windowMs: Int
+        public var snapshotLines: Int
+        /// A send goes only to an agent that has stopped. Shown locked in the UI: a
+        /// safety rule, not a preference.
+        public var requireStopForSend: Bool
+        public var maxSendBytes: Int
+        public var defaultSnippet: String
+        /// Extra named snippets. D6: none by default.
+        public var snippets: [String: String]
+
+        public init(
+            mode: Mode = .armed,
+            windowMs: Int = 3000,
+            snapshotLines: Int = 20,
+            requireStopForSend: Bool = true,
+            maxSendBytes: Int = 4096,
+            defaultSnippet: String = "sigue",
+            snippets: [String: String] = [:]
+        ) {
+            self.mode = mode
+            self.windowMs = windowMs
+            self.snapshotLines = snapshotLines
+            self.requireStopForSend = requireStopForSend
+            self.maxSendBytes = maxSendBytes
+            self.defaultSnippet = defaultSnippet
+            self.snippets = snippets
+        }
+    }
+
+    public struct Launch: Equatable, Sendable {
+        /// `claude`, `codex`, or a preset UUID from Superset's agent configs.
+        public var newAgent: String
+        public var handoffAgent: String
+        /// `nil` until the host-service's own maximum has been verified.
+        public var handoffContextChars: Int?
+        /// A second NEW inside this is dropped (D2: debounce, no confirmation).
+        public var createCooldownMs: Int
+
+        public init(
+            newAgent: String = "claude",
+            handoffAgent: String = "codex",
+            handoffContextChars: Int? = nil,
+            createCooldownMs: Int = 2000
+        ) {
+            self.newAgent = newAgent
+            self.handoffAgent = handoffAgent
+            self.handoffContextChars = handoffContextChars
+            self.createCooldownMs = createCooldownMs
+        }
+    }
+
     public struct Countdown: Equatable, Sendable {
         /// Fires each cue early, to cancel a ~86ms ring write plus audio latency.
         public var leadMs: Int
@@ -277,12 +610,64 @@ public struct Preferences: Equatable, Sendable {
         }
     }
 
+    /// The look of a session restored from disk and not yet confirmed by Superset. A
+    /// flag on the entry rather than a `SessionState` (D11), so it is keyed by name.
+    public static let unconfirmedKey = "unconfirmed"
+    public static let unconfirmedDefault = Appearance(
+        color: RGB(0x2E4A6B), effect: .solid, brightness: 0.3, speed: 0
+    )
+
+    /// The Superset desktop app, whose profile ships built in.
+    public static let supersetBundleID = "com.superset.desktop"
+
+    /**
+     Superset's own shortcuts, bound in its profile (Plan §2.6): workspaces on ⌘⌥↑↓,
+     tabs on ⌘⌥←→, the command palette on ⌘⇧K, the diff viewer on ⌘⇧L and quick
+     workspace creation on ⌘⇧N. Editable, because Superset lets people remap them.
+     */
+    public static let supersetShortcuts: [String: Shortcut] = {
+        let b = supersetBundleID
+        return [
+            "JOY.up@\(b)": Shortcut(keyCode: 126, modifiers: [.command, .option], key: "↑"),
+            "JOY.down@\(b)": Shortcut(keyCode: 125, modifiers: [.command, .option], key: "↓"),
+            "JOY.left@\(b)": Shortcut(keyCode: 123, modifiers: [.command, .option], key: "←"),
+            "JOY.right@\(b)": Shortcut(keyCode: 124, modifiers: [.command, .option], key: "→"),
+            "ENC.long@\(b)": Shortcut(keyCode: 40, modifiers: [.command, .shift], key: "K"),
+            "ACT09.long@\(b)": Shortcut(keyCode: 37, modifiers: [.command, .shift], key: "L"),
+            "ACT11.long@\(b)": Shortcut(keyCode: 45, modifiers: [.command, .shift], key: "N"),
+        ]
+    }()
+
+    /**
+     The clone's caps (FAST APPR REJ BRANCH MIC NEW CODEX), not the upstream layout of
+     `KeyAction.defaults`: this fork is for that pad, and the long presses below are
+     written for these caps — holding APPR must land on the cap that approves.
+
+     D1: NEW and CODEX ship explicitly unassigned. ACT11 typed `/clear` and ACT12 sent
+     ⏎ into whatever was in front, and together they cleared a session.
+     */
+    public static let cloneActionKeys: [String: KeyAction?] = [
+        "ACT06": .shortcut,
+        "ACT07": .approve,
+        "ACT08": .reject,
+        "ACT09": .nextSession,
+        "ACT10": .voiceTalk,
+        "ACT11": KeyAction?.none,
+        "ACT12": KeyAction?.none,
+        "ENC": KeyAction.defaults["ENC"],
+    ]
+
+    /// FAST's tap: ⇧⇥, Claude Code's permission-mode toggle. Reversible, so safe on a key.
+    public static let fastShortcut = Shortcut(keyCode: 48, modifiers: [.shift], key: "⇥")
+
     public static let `default` = Preferences(
         states: Dictionary(
             uniqueKeysWithValues: SessionState.allCases.map { ($0.rawValue, $0.defaultAppearance) }
-        ),
-        actionKeys: KeyAction.defaults.mapValues { Optional($0) },
-        snippets: ["ACT08": "/start-ticket"],
+        ).merging([unconfirmedKey: unconfirmedDefault]) { old, _ in old },
+        actionKeys: cloneActionKeys,
+        // No default key types a snippet, so none ships.
+        snippets: [:],
+        shortcuts: supersetShortcuts.merging(["ACT06": fastShortcut]) { old, _ in old },
         caps: KeycapCatalog.defaultCaps,
         deviceNames: [:],
         harnessesSeen: [],
@@ -300,7 +685,26 @@ public struct Preferences: Equatable, Sendable {
         // something. See SessionRegistry.decay.
         doneDecaySeconds: 0,
         holdAttention: true,
-        maxHoldSeconds: 60
+        maxHoldSeconds: 60,
+        profiles: [
+            supersetBundleID: AppProfile(
+                joystick: Dictionary(
+                    uniqueKeysWithValues: OpenBoardKit.Joystick.Direction.allCases.map { ($0, KeyAction?.some(.shortcut)) }
+                ),
+                encoderLongPress: .some(.shortcut)
+            ),
+        ],
+        // D7: APPR held jumps to whoever has waited longest. D4/D10: FAST held arms
+        // the targeted mode. Keyed by the clone's caps — see `cloneActionKeys`.
+        actionKeysLong: [
+            "ACT06": .targetedArm,
+            // F8: CODEX held hands the focused terminal off to `launch.handoffAgent`.
+            "ACT12": .supersetHandoff,
+            "ACT07": .jumpOldestWaiting,
+            "ACT08": .interruptFocused,
+            "ACT09": .shortcut,
+            "ACT11": .shortcut,
+        ]
     )
 
     public init(
@@ -324,7 +728,20 @@ public struct Preferences: Equatable, Sendable {
         doneDecaySeconds: Int,
         holdAttention: Bool = true,
         maxHoldSeconds: Int,
-        voiceChord: Bool = false
+        voiceChord: Bool = false,
+        padScope: PadScope = .focusedWorkspace,
+        workspaceTransition: WorkspaceTransition = WorkspaceTransition(),
+        workspaceIdentity: WorkspaceIdentity = WorkspaceIdentity(),
+        overflow: Overflow = Overflow(),
+        superset: Superset = Superset(),
+        profiles: [String: AppProfile] = [:],
+        actionKeysLong: [String: KeyAction?] = [:],
+        actionLongPressMs: Int = 500,
+        confirm: Confirm = Confirm(),
+        targeted: Targeted = Targeted(),
+        launch: Launch = Launch(),
+        snippetsAllowDangerous: Bool = false,
+        customThemes: [CustomTheme] = []
     ) {
         self.states = states
         self.actionKeys = actionKeys
@@ -347,6 +764,19 @@ public struct Preferences: Equatable, Sendable {
         self.holdAttention = holdAttention
         self.maxHoldSeconds = maxHoldSeconds
         self.voiceChord = voiceChord
+        self.padScope = padScope
+        self.workspaceTransition = workspaceTransition
+        self.workspaceIdentity = workspaceIdentity
+        self.overflow = overflow
+        self.superset = superset
+        self.profiles = profiles
+        self.actionKeysLong = actionKeysLong
+        self.actionLongPressMs = actionLongPressMs
+        self.confirm = confirm
+        self.targeted = targeted
+        self.launch = launch
+        self.snippetsAllowDangerous = snippetsAllowDangerous
+        self.customThemes = customThemes
     }
 
     // MARK: - typed accessors
@@ -363,6 +793,16 @@ public struct Preferences: Equatable, Sendable {
     /// "unassigned" means to a caller looking one up.
     public var keyActions: [String: KeyAction] {
         actionKeys.compactMapValues { $0 }
+    }
+
+    /// `states["unconfirmed"]`, or its default. See `unconfirmedKey`.
+    public var unconfirmedAppearance: Appearance {
+        states[Self.unconfirmedKey] ?? Self.unconfirmedDefault
+    }
+
+    /// Long-press bindings that are actually set, like `keyActions`.
+    public var keyActionsLong: [String: KeyAction] {
+        actionKeysLong.compactMapValues { $0 }
     }
 
     public var notificationStates: [String: SessionState] {
@@ -404,9 +844,13 @@ extension Preferences {
 
         if let states = json["states"] as? [String: Any] {
             for (name, raw) in states {
+                // Known states, plus the one look that is not a state (D11). Anything
+                // else is a typo, and keeping it would only be carried around forever.
                 guard let fields = raw as? [String: Any],
-                      let state = SessionState(rawValue: name) else { continue }
-                var appearance = result.states[name] ?? state.defaultAppearance
+                      let fallback = SessionState(rawValue: name)?.defaultAppearance
+                        ?? (name == unconfirmedKey ? unconfirmedDefault : nil)
+                else { continue }
+                var appearance = result.states[name] ?? fallback
                 if let color = parseColor(fields["color"]) { appearance.color = color }
                 if let effect = fields["effect"] as? String,
                    let parsed = LEDEffect(rawValue: effect) { appearance.effect = parsed }
@@ -438,6 +882,8 @@ extension Preferences {
             // An entry without a key code is skipped, not fatal — like an unknown
             // action name in `actionKeys`.
             for (key, raw) in shortcuts {
+                // `null` removes one — the way a built-in Superset chord stays deleted.
+                if raw is NSNull { result.shortcuts[key] = nil; continue }
                 guard let fields = raw as? [String: Any],
                       let shortcut = Shortcut(json: fields) else { continue }
                 result.shortcuts[key] = shortcut
@@ -579,8 +1025,204 @@ extension Preferences {
         }
         if let value = json["maxHoldSeconds"] as? Int { result.maxHoldSeconds = value }
         if let value = json["voiceChord"] as? Bool { result.voiceChord = value }
+        if let raw = json["padScope"] as? String, let value = PadScope(rawValue: raw) {
+            result.padScope = value
+        }
+        mergeWorkspace(json, into: &result)
+        mergeSuperset(json, into: &result)
 
         return result
+    }
+
+    /// An action name, `null` as an explicit unassign, and anything else as absent.
+    private static func bindingValue(_ raw: Any?) -> KeyAction?? {
+        if raw is NSNull { return .some(nil) }
+        guard let name = raw as? String, let action = KeyAction(rawValue: name) else { return nil }
+        return .some(action)
+    }
+
+    private static func bindingJSON(_ value: KeyAction?) -> Any { value?.rawValue ?? NSNull() }
+
+    /// The Superset groups (Plan §2.5), field by field. Clamped where a value would
+    /// break the thing it times; the ranges match the settings window's controls.
+    private static func mergeSuperset(_ json: [String: Any], into result: inout Preferences) {
+        func int(_ raw: Any?, _ range: ClosedRange<Int>) -> Int? {
+            (raw as? Int).map { min(max($0, range.lowerBound), range.upperBound) }
+        }
+        func unit(_ raw: Any?) -> Double? {
+            (raw as? NSNumber).map { min(max($0.doubleValue, 0), 1) }
+        }
+
+        if let fields = json["superset"] as? [String: Any] {
+            var s = result.superset
+            if let raw = fields["hostClient"] as? String, let value = Superset.HostClient(rawValue: raw) {
+                s.hostClient = value
+            }
+            if fields["orgId"] is NSNull {
+                s.orgID = nil
+            } else if let value = fields["orgId"] as? String {
+                s.orgID = value.isEmpty ? nil : value
+            }
+            if let value = fields["testedVersion"] as? String, !value.isEmpty { s.testedVersion = value }
+            // Unknown policy text is ignored, never read as `full`.
+            if let raw = fields["onVersionMismatch"] as? String,
+               let value = Superset.MismatchPolicy(rawValue: raw) { s.onVersionMismatch = value }
+            if let value = fields["events"] as? Bool { s.events = value }
+            if let value = int(fields["startDebounceMs"], 0...5000) { s.startDebounceMs = value }
+            if let value = int(fields["dedupeWindowMs"], 0...10000) { s.dedupeWindowMs = value }
+            if let value = int(fields["padWriteCoalesceMs"], 0...1000) { s.padWriteCoalesceMs = value }
+            if let value = fields["reconcileOnLaunch"] as? Bool { s.reconcileOnLaunch = value }
+            result.superset = s
+        }
+
+        if let profiles = json["profiles"] as? [String: Any] {
+            for (bundle, raw) in profiles {
+                // `null` deletes one, so a removed built-in profile stays removed.
+                if raw is NSNull { result.profiles[bundle] = nil; continue }
+                guard let fields = raw as? [String: Any] else { continue }
+                // Replaced, not merged over the built-in one: inside a profile, absent
+                // means "inherit the base binding", so a merge could never express
+                // "stop overriding this direction" — it would come back on every launch.
+                var profile = AppProfile()
+                if let stick = fields["joystick"] as? [String: Any] {
+                    for direction in OpenBoardKit.Joystick.Direction.allCases {
+                        if let value = bindingValue(stick[direction.rawValue]) {
+                            profile.joystick[direction] = value
+                        }
+                    }
+                }
+                if let encoder = fields["encoder"] as? [String: Any],
+                   let value = bindingValue(encoder["longPress"]) {
+                    profile.encoderLongPress = value
+                }
+                if let keys = fields["actionKeysLong"] as? [String: Any] {
+                    for (key, raw) in keys {
+                        if let value = bindingValue(raw) { profile.actionKeysLong[key] = value }
+                    }
+                }
+                result.profiles[bundle] = profile
+            }
+        }
+
+        if let keys = json["actionKeysLong"] as? [String: Any] {
+            for (key, raw) in keys {
+                if let value = bindingValue(raw) { result.actionKeysLong[key] = value }
+            }
+        }
+        if let value = int(json["actionLongPressMs"], 250...1500) { result.actionLongPressMs = value }
+
+        if let fields = json["confirm"] as? [String: Any] {
+            var c = result.confirm
+            if let value = int(fields["windowMs"], 1000...10000) { c.windowMs = value }
+            if let color = parseColor(fields["color"]) { c.color = color }
+            if let raw = fields["effect"] as? String, let effect = LEDEffect(rawValue: raw) { c.effect = effect }
+            if let value = unit(fields["brightness"]) { c.brightness = value }
+            result.confirm = c
+        }
+
+        if let fields = json["targeted"] as? [String: Any] {
+            var t = result.targeted
+            if let raw = fields["mode"] as? String, let mode = Targeted.Mode(rawValue: raw) { t.mode = mode }
+            if let value = int(fields["windowMs"], 500...10000) { t.windowMs = value }
+            if let value = int(fields["snapshotLines"], 1...200) { t.snapshotLines = value }
+            if let value = fields["requireStopForSend"] as? Bool { t.requireStopForSend = value }
+            if let value = int(fields["maxSendBytes"], 1...16384) { t.maxSendBytes = value }
+            if let value = fields["defaultSnippet"] as? String { t.defaultSnippet = value }
+            if let raw = fields["snippets"] as? [String: Any] {
+                for (name, value) in raw {
+                    if value is NSNull { t.snippets[name] = nil; continue }
+                    if let text = value as? String { t.snippets[name] = text }
+                }
+            }
+            result.targeted = t
+        }
+
+        if let fields = json["launch"] as? [String: Any] {
+            var l = result.launch
+            if let value = fields["newAgent"] as? String, !value.isEmpty { l.newAgent = value }
+            if let value = fields["handoffAgent"] as? String, !value.isEmpty { l.handoffAgent = value }
+            if fields["handoffContextChars"] is NSNull {
+                l.handoffContextChars = nil
+            } else if let value = int(fields["handoffContextChars"], 1...1_000_000) {
+                l.handoffContextChars = value
+            }
+            if let value = int(fields["createCooldownMs"], 0...60000) { l.createCooldownMs = value }
+            result.launch = l
+        }
+
+        // A real boolean only: a hand-typed "true" string does not unlock it.
+        if let value = json["snippetsAllowDangerous"] as? Bool {
+            result.snippetsAllowDangerous = value
+        }
+
+        // Replaced, not merged: the list is the user's, in their order. An entry that
+        // does not decode is dropped on its own rather than costing the others.
+        if let raw = json["customThemes"] as? [Any] {
+            result.customThemes = raw.compactMap { ($0 as? [String: Any]).flatMap(ThemeFile.custom(fromEntry:)) }
+        }
+    }
+
+    /// The three workspace groups, field by field like every other group. Timings are
+    /// clamped to what the transition can survive: a negative delay is a crash in
+    /// `Task.sleep`, and a zero fade step count is a sweep that never ends.
+    private static func mergeWorkspace(_ json: [String: Any], into result: inout Preferences) {
+        func int(_ raw: Any?, _ range: ClosedRange<Int>) -> Int? {
+            (raw as? Int).map { min(max($0, range.lowerBound), range.upperBound) }
+        }
+        func unit(_ raw: Any?) -> Double? {
+            (raw as? NSNumber).map { min(max($0.doubleValue, 0), 1) }
+        }
+
+        if let fields = json["workspaceTransition"] as? [String: Any] {
+            var t = result.workspaceTransition
+            // An unknown style is ignored rather than guessed — "wave" was designed and
+            // not built, and must not silently mean "off".
+            if let raw = fields["style"] as? String, let style = WorkspaceTransition.Style(rawValue: raw) {
+                t.style = style
+            }
+            if let value = fields["respectReduceMotion"] as? Bool { t.respectReduceMotion = value }
+            if let value = int(fields["debounceMs"], 0...2000) { t.debounceMs = value }
+            if let value = int(fields["rapidWindowMs"], 0...10000) { t.rapidWindowMs = value }
+            if let value = int(fields["keyStaggerMs"], 0...1000) { t.keyStaggerMs = value }
+            if let value = int(fields["firstKeyDelayMs"], 0...1000) { t.firstKeyDelayMs = value }
+            if let value = int(fields["overflowDelayMs"], 0...1000) { t.overflowDelayMs = value }
+            if let value = fields["ringSweep"] as? Bool { t.ringSweep = value }
+            if let value = unit(fields["ringSpeed"]) { t.ringSpeed = value }
+            if let value = unit(fields["ringBrightness"]) { t.ringBrightness = value }
+            if let value = int(fields["ringHoldMs"], 0...5000) { t.ringHoldMs = value }
+            if let value = int(fields["ringFadeSteps"], 1...20) { t.ringFadeSteps = value }
+            if let value = int(fields["ringFadeStepMs"], 10...500) { t.ringFadeStepMs = value }
+            if let value = int(fields["minSweepIntervalMs"], 0...60000) { t.minSweepIntervalMs = value }
+            result.workspaceTransition = t
+        }
+
+        if let fields = json["workspaceIdentity"] as? [String: Any] {
+            // Replaced, not merged: a palette is an ordered list, and merging two would
+            // move every workspace's color.
+            if let raw = fields["palette"] as? [Any] {
+                let palette = raw.compactMap(parseColor)
+                if !palette.isEmpty { result.workspaceIdentity.palette = palette }
+            }
+            if let raw = fields["colors"] as? [String: Any] {
+                for (id, value) in raw {
+                    if value is NSNull { result.workspaceIdentity.colors[id] = nil; continue }
+                    if let color = parseColor(value) { result.workspaceIdentity.colors[id] = color }
+                }
+            }
+        }
+
+        if let fields = json["overflow"] as? [String: Any] {
+            var o = result.overflow
+            if let value = fields["enabled"] as? Bool { o.enabled = value }
+            if let raw = fields["effect"] as? String, let effect = LEDEffect(rawValue: raw) {
+                o.effect = effect
+            }
+            if let value = unit(fields["brightness"]) { o.brightness = value }
+            if let value = int(fields["winkEveryMs"], 500...60000) { o.winkEveryMs = value }
+            if let value = int(fields["winkMs"], 50...2000) { o.winkMs = value }
+            if let value = fields["winkOriginColor"] as? Bool { o.winkOriginColor = value }
+            result.overflow = o
+        }
     }
 
     /// A color is a packed number on disk, but a hand-editor reaches for hex.
@@ -620,7 +1262,7 @@ extension Preferences {
             "states": states,
             "actionKeys": keys,
             "snippets": snippets,
-            "shortcuts": shortcuts.mapValues(\.json),
+            "shortcuts": shortcutsJSON,
             "caps": caps,
             "deviceNames": deviceNames,
             "harnessesSeen": harnessesSeen,
@@ -676,7 +1318,104 @@ extension Preferences {
             "holdAttention": holdAttention,
             "maxHoldSeconds": maxHoldSeconds,
             "voiceChord": voiceChord,
+            "padScope": padScope.rawValue,
+            "workspaceTransition": [
+                "style": workspaceTransition.style.rawValue,
+                "respectReduceMotion": workspaceTransition.respectReduceMotion,
+                "debounceMs": workspaceTransition.debounceMs,
+                "rapidWindowMs": workspaceTransition.rapidWindowMs,
+                "keyStaggerMs": workspaceTransition.keyStaggerMs,
+                "firstKeyDelayMs": workspaceTransition.firstKeyDelayMs,
+                "overflowDelayMs": workspaceTransition.overflowDelayMs,
+                "ringSweep": workspaceTransition.ringSweep,
+                "ringSpeed": workspaceTransition.ringSpeed,
+                "ringBrightness": workspaceTransition.ringBrightness,
+                "ringHoldMs": workspaceTransition.ringHoldMs,
+                "ringFadeSteps": workspaceTransition.ringFadeSteps,
+                "ringFadeStepMs": workspaceTransition.ringFadeStepMs,
+                "minSweepIntervalMs": workspaceTransition.minSweepIntervalMs,
+            ],
+            "workspaceIdentity": [
+                "palette": workspaceIdentity.palette.map { Int($0.value) },
+                "colors": workspaceIdentity.colors.mapValues { Int($0.value) },
+            ],
+            "overflow": [
+                "enabled": overflow.enabled,
+                "effect": overflow.effect.rawValue,
+                "brightness": overflow.brightness,
+                "winkEveryMs": overflow.winkEveryMs,
+                "winkMs": overflow.winkMs,
+                "winkOriginColor": overflow.winkOriginColor,
+            ],
+            "superset": [
+                "hostClient": superset.hostClient.rawValue,
+                "orgId": superset.orgID.map { $0 as Any } ?? NSNull(),
+                "testedVersion": superset.testedVersion,
+                "onVersionMismatch": superset.onVersionMismatch.rawValue,
+                "events": superset.events,
+                "startDebounceMs": superset.startDebounceMs,
+                "dedupeWindowMs": superset.dedupeWindowMs,
+                "padWriteCoalesceMs": superset.padWriteCoalesceMs,
+                "reconcileOnLaunch": superset.reconcileOnLaunch,
+            ],
+            "profiles": profilesJSON,
+            "actionKeysLong": actionKeysLong.mapValues(Self.bindingJSON),
+            "actionLongPressMs": actionLongPressMs,
+            "confirm": [
+                "windowMs": confirm.windowMs,
+                "color": Int(confirm.color.value),
+                "effect": confirm.effect.rawValue,
+                "brightness": confirm.brightness,
+            ],
+            "targeted": [
+                "mode": targeted.mode.rawValue,
+                "windowMs": targeted.windowMs,
+                "snapshotLines": targeted.snapshotLines,
+                "requireStopForSend": targeted.requireStopForSend,
+                "maxSendBytes": targeted.maxSendBytes,
+                "defaultSnippet": targeted.defaultSnippet,
+                "snippets": targeted.snippets,
+            ],
+            "launch": [
+                "newAgent": launch.newAgent,
+                "handoffAgent": launch.handoffAgent,
+                "handoffContextChars": launch.handoffContextChars.map { $0 as Any } ?? NSNull(),
+                "createCooldownMs": launch.createCooldownMs,
+            ],
+            "snippetsAllowDangerous": snippetsAllowDangerous,
+            "customThemes": customThemes.map(ThemeFile.entry),
         ]
+    }
+
+    /// Every chord, plus a `null` for each built-in one that was deleted — without the
+    /// tombstone the merge over the defaults brings it straight back.
+    private var shortcutsJSON: [String: Any] {
+        var out: [String: Any] = shortcuts.mapValues(\.json)
+        for key in Self.default.shortcuts.keys where shortcuts[key] == nil { out[key] = NSNull() }
+        return out
+    }
+
+    /// Only what each profile names; an inherited binding stays absent. A deleted
+    /// built-in profile is written as `null`, for the same reason as `shortcutsJSON`.
+    private var profilesJSON: [String: Any] {
+        var out: [String: Any] = [:]
+        for (bundle, profile) in profiles {
+            var fields: [String: Any] = [:]
+            if !profile.joystick.isEmpty {
+                var stick: [String: Any] = [:]
+                for (direction, value) in profile.joystick { stick[direction.rawValue] = Self.bindingJSON(value) }
+                fields["joystick"] = stick
+            }
+            if let value = profile.encoderLongPress {
+                fields["encoder"] = ["longPress": Self.bindingJSON(value)]
+            }
+            if !profile.actionKeysLong.isEmpty {
+                fields["actionKeysLong"] = profile.actionKeysLong.mapValues(Self.bindingJSON)
+            }
+            out[bundle] = fields
+        }
+        for bundle in Self.default.profiles.keys where profiles[bundle] == nil { out[bundle] = NSNull() }
+        return out
     }
 }
 

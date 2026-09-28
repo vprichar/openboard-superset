@@ -25,7 +25,9 @@
 # Environment:
 #   OB_VERSION    override the marketing version (default: nearest git tag)
 #   OB_BUILD      override the build number    (default: commit count)
-#   OB_IDENTITY   codesign identity to use     (default: best available, see below)
+#   OB_IDENTITY   codesign identity to use     (default: Developer ID, else the
+#                 "OpenBoard Local Signing" cert, else refuse)
+#   OB_ALLOW_ADHOC=1  with neither of those, sign ad-hoc instead of refusing
 
 set -eu
 
@@ -56,7 +58,8 @@ BUNDLE_ID="com.openboardapp.mac"
 # It puts the private half in the login keychain and prints the public half. Paste it
 # here. Losing the private key means no existing install can ever be updated again —
 # back it up with `generate_keys -x`, somewhere that is not this repo.
-SPARKLE_PUBLIC_KEY=${OB_SPARKLE_PUBLIC_KEY:-"CqSaxWCpPony+XcxRwCq73cnQ/g/Mw3mlEKYjYU0Z64="}
+# Fork: left empty so this build never verifies (or installs) an upstream update.
+SPARKLE_PUBLIC_KEY=${OB_SPARKLE_PUBLIC_KEY:-""}
 
 # The update feed. Overridable only so tools/test-update.sh can point a throwaway build
 # at a local server and watch a real update happen without publishing anything.
@@ -64,7 +67,8 @@ SPARKLE_PUBLIC_KEY=${OB_SPARKLE_PUBLIC_KEY:-"CqSaxWCpPony+XcxRwCq73cnQ/g/Mw3mlEK
 # Nothing else should set this. The value compiled into a shipped build is read by that
 # install forever, so a release that goes out pointing at localhost is an install that
 # can never be updated again — see the note beside SUFeedURL below.
-FEED_URL=${OB_FEED_URL:-"https://updates.openboardapp.com/appcast.xml"}
+# Fork: no feed, so the daily upstream check can never overwrite this build.
+FEED_URL=${OB_FEED_URL:-""}
 
 # Sparkle refuses a plain-HTTP feed unless the updates themselves are signed, which
 # ours are — but macOS App Transport Security blocks the request before Sparkle sees
@@ -93,6 +97,69 @@ command -v swift >/dev/null 2>&1 || {
   printf 'swift not found — install the Xcode command line tools:\n  xcode-select --install\n' >&2
   exit 1
 }
+
+# ---------------------------------------------------------------- identity
+#
+# Resolved before compiling, so a build that would be signed wrong costs nothing.
+#
+# Preference order, and each rung means something different:
+#
+#   1. Developer ID Application — the only one other people's Macs trust. Required for
+#      notarization, and the reason an update can keep its permissions: the designated
+#      requirement is the team identity, so v1.4 is the same app as v1.3 to TCC.
+#   2. OpenBoard Local Signing  — self-signed, this machine only. Stable enough that
+#      grants survive a rebuild. See tools/make-signing-cert.sh.
+#   3. ad-hoc                   — valid, but a new app to TCC on every build. Only
+#      with OB_ALLOW_ADHOC=1; otherwise the build refuses.
+#
+# The local rung is searched in the *unfiltered* listing. `security find-identity -v`
+# shows only trusted identities, and a self-signed certificate is untrusted, so with -v
+# the search never found it, fell through to ad-hoc, and every such build silently
+# became a new app to TCC — Input Monitoring and Accessibility lost on the next launch.
+# A Developer ID is trusted, so -v is kept for it: it must also be *valid* to count.
+if [ -n "${OB_IDENTITY:-}" ]; then
+  IDENTITY="$OB_IDENTITY"
+  # Classify what was passed rather than assume it: only a Developer ID carries a
+  # Team ID. Treating a self-signed identity as one skipped the library-validation
+  # exception below, and dyld killed the app at launch ("Library missing" on Sparkle).
+  # Unfiltered listing (no -v): a self-signed cert is untrusted and -v would hide it.
+  if [ "$IDENTITY" = "-" ]; then
+    IDENTITY_KIND="adhoc"
+  elif security find-identity -p codesigning 2>/dev/null \
+      | grep "Developer ID Application" | grep -qF "$IDENTITY"; then
+    IDENTITY_KIND="developer-id"
+  else
+    IDENTITY_KIND="local"
+  fi
+else
+  IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep "Developer ID Application" | head -1 | awk '{print $2}')
+  IDENTITY_KIND="developer-id"
+  if [ -z "$IDENTITY" ]; then
+    IDENTITY=$(security find-identity -p codesigning 2>/dev/null \
+      | grep "OpenBoard Local Signing" | head -1 | awk '{print $2}')
+    IDENTITY_KIND="local"
+  fi
+  if [ -z "$IDENTITY" ]; then
+    if [ -z "${OB_ALLOW_ADHOC:-}" ]; then
+      {
+        printf 'refusing to build: OB_IDENTITY is not set and there is no Developer ID\n'
+        printf 'or "OpenBoard Local Signing" certificate. This build would be signed ad-hoc,\n'
+        printf 'and macOS would drop the Input Monitoring and Accessibility grants.\n\n'
+        printf 'List every signing identity, untrusted local ones included:\n'
+        printf '  security find-identity -p codesigning\n'
+        printf 'then pass the hash of the one to use:\n'
+        printf '  OB_IDENTITY=<hash> %s\n' "$0"
+        printf 'or create the local one with tools/make-signing-cert.sh.\n\n'
+        printf 'To build ad-hoc anyway (grants will not survive): OB_ALLOW_ADHOC=1 %s\n' "$0"
+      } >&2
+      exit 1
+    fi
+    IDENTITY="-"
+    IDENTITY_KIND="adhoc"
+  fi
+fi
+printf 'signing identity: %s (%s)\n' "$IDENTITY" "$IDENTITY_KIND"
 
 # ---------------------------------------------------------------- version
 #
@@ -271,7 +338,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 $ATS_EXCEPTION
   <key>SUPublicEDKey</key>
   <string>$SPARKLE_PUBLIC_KEY</string>
-  <key>SUEnableAutomaticChecks</key>    <true/>
+  <key>SUEnableAutomaticChecks</key>    <false/>
   <key>SUScheduledCheckInterval</key>   <integer>86400</integer>
 
   <key>OBSourceStamp</key>              <string>$STAMP</string>
@@ -281,14 +348,7 @@ PLIST
 
 # ---------------------------------------------------------------- signing
 #
-# Preference order, and each rung means something different:
-#
-#   1. Developer ID Application — the only one other people's Macs trust. Required for
-#      notarization, and the reason an update can keep its permissions: the designated
-#      requirement is the team identity, so v1.4 is the same app as v1.3 to TCC.
-#   2. OpenBoard Local Signing  — self-signed, this machine only. Stable enough that
-#      grants survive a rebuild. See tools/make-signing-cert.sh.
-#   3. ad-hoc                   — valid, but a new app to TCC on every build.
+# The identity was resolved before compiling (see "identity" above).
 #
 # --timestamp only on a Developer ID *release* build. It is a network round-trip to
 # Apple's timestamp authority on every signature — notarization requires one, so a
@@ -298,24 +358,6 @@ PLIST
 # Leaving it off a debug build costs nothing else: the timestamp is not part of the
 # designated requirement, so a debug build and a release build made from the same
 # certificate are still the same app to TCC, and permissions carry across both.
-if [ -n "${OB_IDENTITY:-}" ]; then
-  IDENTITY="$OB_IDENTITY"
-  IDENTITY_KIND="developer-id"
-else
-  IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
-    | grep "Developer ID Application" | head -1 | awk '{print $2}')
-  IDENTITY_KIND="developer-id"
-  if [ -z "$IDENTITY" ]; then
-    IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null \
-      | grep "OpenBoard Local Signing" | head -1 | awk '{print $2}')
-    IDENTITY_KIND="local"
-  fi
-  if [ -z "$IDENTITY" ]; then
-    IDENTITY="-"
-    IDENTITY_KIND="adhoc"
-  fi
-fi
-
 if [ "$IDENTITY_KIND" = "developer-id" ] && [ "$CONFIG" = "release" ]; then
   TS_FLAG="--timestamp"
   printf 'signing with Developer ID (timestamped)…\n'

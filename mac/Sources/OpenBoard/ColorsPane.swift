@@ -110,10 +110,10 @@ struct ColorsPane: View {
     /// dark between events.
     private var ambientExplanation: String {
         switch currentAmbientMode {
-        case .events: "Dark, except for a lap when something changes."
-        case .aggregate: "Holds the color of the most urgent session. Laps still fire."
-        case .fixed: "Holds one color whatever the board is doing. Laps still fire."
-        case .off: "Never lights, laps included."
+        case .events: tr("Apagado, salvo una vuelta cuando algo cambia.")
+        case .aggregate: tr("Mantiene el color de la sesión más urgente. Las vueltas siguen saliendo.")
+        case .fixed: tr("Mantiene un color haga lo que haga el tablero. Las vueltas siguen saliendo.")
+        case .off: tr("Nunca se enciende, ni siquiera con vueltas.")
         }
     }
 
@@ -124,6 +124,28 @@ struct ColorsPane: View {
             get: { board.preferences.ambient[keyPath: path] },
             set: { value in
                 board.updatePreferences { $0.ambient[keyPath: path] = value }
+                commands.bindingsChanged()
+            }
+        )
+    }
+
+    // MARK: - state rows
+
+    private func stateBinding(_ state: SessionState) -> Binding<Appearance> {
+        Binding(
+            get: { board.appearances[state] ?? state.defaultAppearance },
+            set: { next in
+                board.appearances[state] = next
+                commands.bindingsChanged()
+            }
+        )
+    }
+
+    private var unconfirmedBinding: Binding<Appearance> {
+        Binding(
+            get: { board.preferences.unconfirmedAppearance },
+            set: { next in
+                board.updatePreferences { SettingsEditing.setUnconfirmedAppearance(next, in: &$0) }
                 commands.bindingsChanged()
             }
         )
@@ -165,27 +187,27 @@ struct ColorsPane: View {
                 // "Colors" was doing two jobs — page title and the heading for the
                 // rows below it. The title goes; the heading it was quietly providing
                 // has to stay, or the states arrive unannounced.
-                PaneHeader("States", "What each one looks like on a session key.")
+                PaneHeader(tr("Estados"), tr("Cómo se ve cada uno en una tecla de sesión."))
                 statesSection
 
                 HStack {
-                    Button("Reset to defaults") { commands.resetColors() }
+                    Button(tr("Restablecer valores predeterminados")) { commands.resetColors() }
                         .controlSize(.small)
                     Spacer(minLength: 0)
-                    Text("Saved to \(PreferencesStore.url().lastPathComponent)")
-                        .font(.system(size: 11).monospaced())
+                    Text(tr("Guardado en %@", PreferencesStore.url().lastPathComponent))
+                        .font(.system(size: 11))
                         .foregroundStyle(.tertiary)
                 }
 
-                PaneHeader("How long a color stays", "When the board clears a color on its own.")
+                PaneHeader(tr("Cuánto dura un color"), tr("Cuándo borra el tablero un color por su cuenta."))
                 holdSection
 
-                PaneHeader("The ring", "The outer light, which summarises the whole board.")
+                PaneHeader(tr("El anillo"), tr("La luz exterior, que resume todo el tablero."))
                 ringSection
 
                 // Kept: "Fun mode" says nothing, and this one takes over the entire
                 // board — including status — for four minutes.
-                PaneHeader("Fun mode", "Takes over the whole pad, status included, for the song.")
+                PaneHeader(tr("Modo diversión"), tr("Ocupa todo el pad, estado incluido, mientras dura la canción."))
                 funSection
             }
             .padding(22)
@@ -200,10 +222,10 @@ struct ColorsPane: View {
             // least discoverable control on the pane — it opens color, hex and speed —
             // so the leading header says so instead of naming the column.
             HStack(spacing: 12) {
-                GroupLabel("STATE — CLICK THE SWATCH FOR COLOR, HEX & SPEED")
+                GroupLabel(tr("ESTADO — CLIC EN LA MUESTRA: COLOR, HEX Y VELOCIDAD"))
                 Spacer(minLength: 8)
-                GroupLabel("EFFECT").frame(width: 130, alignment: .leading)
-                GroupLabel("BRIGHTNESS").frame(width: 90, alignment: .leading)
+                GroupLabel(tr("EFECTO")).frame(width: 130, alignment: .leading)
+                GroupLabel(tr("BRILLO")).frame(width: 90, alignment: .leading)
                 // Same footprint as the row's play button, so the columns line up.
                 Image(systemName: "play.fill").font(.system(size: 9)).hidden()
             }
@@ -212,8 +234,24 @@ struct ColorsPane: View {
 
             ForEach(Array(SessionState.displayOrder.enumerated()), id: \.element) { index, state in
                 Divider().opacity(index > 0 ? 0.3 : 0.15)
-                StateRow(state: state)
+                StateRow(
+                    title: state.label,
+                    means: state.means,
+                    appearance: stateBinding(state),
+                    preview: { commands.previewState(state) }
+                )
             }
+
+            // Not a `SessionState`: a claim restored at launch that no live event has
+            // confirmed yet. Last, because it is what a state looks like *before* it is
+            // one of the rows above.
+            Divider().opacity(0.3)
+            StateRow(
+                title: tr("sin confirmar"),
+                means: tr("Restaurada al abrir la app, aún no vista en vivo."),
+                appearance: unconfirmedBinding,
+                preview: { commands.previewUnconfirmed() }
+            )
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 2)
@@ -224,14 +262,14 @@ struct ColorsPane: View {
         VStack(alignment: .leading, spacing: 10) {
             holdToggle(
                 state: .done,
-                title: "Keep finished sessions lit until you go back",
-                detail: "Clears when you send that session something.",
+                title: tr("Mantener encendidas las sesiones terminadas hasta que vuelvas"),
+                detail: tr("Se borra cuando le envías algo a esa sesión."),
                 isOn: holdDoneBinding
             )
 
             if !holdsDone {
                 HStack(spacing: 8) {
-                    Text("Clears after")
+                    Text(tr("Se borra tras"))
                         .font(.system(size: 11.5)).foregroundStyle(.secondary)
                     Slider(value: doneSecondsBinding, in: 10...600, step: 10)
                         .frame(width: 200)
@@ -247,12 +285,12 @@ struct ColorsPane: View {
 
             holdToggle(
                 state: .awaiting,
-                title: "Keep sessions lit while they wait for you",
+                title: tr("Mantener encendidas las sesiones mientras te esperan"),
                 detail: board.preferences.holdAttention
-                    ? "Clears the moment the prompt is answered."
+                    ? tr("Se borra en cuanto respondes.")
                     // Kept: an orange that vanishes on its own otherwise looks like the
                     // board losing track rather than a deliberate bound.
-                    : "Clears when answered, or after 15 minutes if it never is.",
+                    : tr("Se borra al responder, o a los 15 min si nadie responde."),
                 isOn: holdAttentionBinding
             )
         }
@@ -263,10 +301,10 @@ struct ColorsPane: View {
     private var ringSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("", selection: ambientModeBinding) {
-                Text("Laps only").tag(Ambient.Mode.events)
-                Text("Show the board").tag(Ambient.Mode.aggregate)
-                Text("One color").tag(Ambient.Mode.fixed)
-                Text("Never light").tag(Ambient.Mode.off)
+                Text(tr("Solo vueltas")).tag(Ambient.Mode.events)
+                Text(tr("Ver tablero")).tag(Ambient.Mode.aggregate)
+                Text(tr("Un color")).tag(Ambient.Mode.fixed)
+                Text(tr("Sin luz")).tag(Ambient.Mode.off)
             }
             .labelsHidden()
             .pickerStyle(.segmented)
@@ -295,25 +333,25 @@ struct ColorsPane: View {
             // Above the laps, because it is not one: a lap fires and ends, this holds
             // for as long as the machine is listening.
             VStack(spacing: 0) {
-                lapToggle("Spin while dictating", isOn: lapBinding(\.voiceRainbow))
+                lapToggle(tr("Girar mientras dictas"), isOn: lapBinding(\.voiceRainbow))
             }
             .padding(.horizontal, 12)
             .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
 
-            GroupLabel("LAPS")
+            GroupLabel(tr("VUELTAS"))
             VStack(spacing: 0) {
-                lapToggle("A chat finishes", isOn: lapBinding(\.completionLap))
+                lapToggle(tr("Termina un chat"), isOn: lapBinding(\.completionLap))
                 Divider().opacity(0.3)
-                lapToggle("One needs you", isOn: lapBinding(\.questionLap))
+                lapToggle(tr("Uno te necesita"), isOn: lapBinding(\.questionLap))
                 Divider().opacity(0.3)
-                lapToggle("One fails", isOn: lapBinding(\.errorPulse))
+                lapToggle(tr("Uno falla"), isOn: lapBinding(\.errorPulse))
             }
             .padding(.horizontal, 12)
             .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
             .disabled(currentAmbientMode == .off)
             .opacity(currentAmbientMode == .off ? 0.45 : 1)
 
-            GroupLabel("PLAY ONE NOW")
+            GroupLabel(tr("REPRODUCIR UNO AHORA"))
             LazyVGrid(columns: showColumns, spacing: 10) {
                 ForEach(Shows.all, id: \.name) { show in
                     ShowCard(show: show, running: board.runningShow == show.name) {
@@ -378,8 +416,8 @@ struct ColorsPane: View {
     private var funSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Button(board.funModeRunning ? "Stop"
-                        : selectedSong.isEmpty ? "Play" : "Play \(selectedSong)") {
+                Button(board.funModeRunning ? tr("Detener")
+                        : selectedSong.isEmpty ? tr("Reproducir") : tr("Reproducir %@", selectedSong)) {
                     commands.playCountdown()
                 }
                 .disabled(!board.device.isUsable || !mediaPresent)
@@ -390,7 +428,7 @@ struct ColorsPane: View {
             }
 
             if !mediaPresent {
-                Text("No video installed — put one in \(AppPaths.media().path).")
+                Text(tr("No hay video instalado — pon uno en %@.", AppPaths.media().path))
                     .font(.system(size: 11.5))
                     .foregroundStyle(Color(RGB(0xFF6A00)))
                     .fixedSize(horizontal: false, vertical: true)
@@ -399,15 +437,15 @@ struct ColorsPane: View {
                 // broken one look identical — two early runs were cancelled at 3 and 10
                 // beats, well before it was going to light.
                 Text(
-                    "The ring stays dark for the first "
-                        + "\(String(format: "%.1f", board.preferences.countdown.introFlashSec))s."
+                    tr("El anillo sigue apagado durante los primeros %.1fs.",
+                       board.preferences.countdown.introFlashSec)
                 )
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
             }
 
             if permissionMissing {
-                Text("Needs Automation → QuickTime Player, on the Device pane.")
+                Text(tr("Necesita Automatización → QuickTime Player, en el panel Dispositivo."))
                     .font(.system(size: 11.5))
                     .foregroundStyle(Color(RGB(0xFF6A00)))
             }
@@ -418,20 +456,21 @@ struct ColorsPane: View {
 /**
  One state, as a single row.
 
- Swatch, name, effect, brightness — the four worth seeing for all seven states at once.
+ Swatch, name, effect, brightness — the four worth seeing for all states at once.
  Everything else lives behind the swatch: presets, hex and speed are set once and then
  left, while comparing states against each other is what this pane is for.
+
+ Takes the appearance as a binding rather than a `SessionState`, so the same row serves
+ `unconfirmed`, which is stored beside the states but is not one of them.
  */
 private struct StateRow: View {
-    @EnvironmentObject private var board: BoardModel
-    @Environment(\.boardCommands) private var commands
+    let title: String
+    let means: String
+    @Binding var appearance: Appearance
+    /// Shows it on the pad; `nil` hides the button but keeps its column.
+    let preview: (() -> Void)?
 
-    let state: SessionState
     @State private var editing = false
-
-    private var appearance: Appearance {
-        board.appearances[state] ?? state.defaultAppearance
-    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -448,28 +487,29 @@ private struct StateRow: View {
                     }
             }
             .buttonStyle(.plain)
-            .help("Color, hex and speed")
+            .help(tr("Color, hex y velocidad"))
             .popover(isPresented: $editing, arrowEdge: .bottom) {
-                // Re-injected by hand: popover content hosts in its own window, and
-                // macOS does not reliably carry custom environment values across
-                // that boundary. Without this the editor resolves the *default*
-                // BoardCommands — every closure a silent no-op — so a color picked
-                // here painted the swatch, saved nothing, and reverted on relaunch.
-                ColorEditor(state: state).padding(14)
-                    .environmentObject(board)
-                    .environment(\.boardCommands, commands)
+                // The editor writes through bindings that already hold the model and
+                // the commands, so nothing depends on environment values crossing
+                // into the popover's own window — which macOS does not reliably do.
+                ColorEditor(
+                    title: title,
+                    color: $appearance.color,
+                    speed: appearance.effect.isAnimated ? $appearance.speed : nil
+                )
+                .padding(14)
             }
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(state.label).font(.system(size: 12.5, weight: .medium))
+                Text(title).font(.system(size: 12.5, weight: .medium))
                 // Kept: `stalled` and `viewing` are this product's words, not anything
                 // anyone arrives already knowing.
-                Text(state.means)
+                Text(means)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 if appearance.color.isNearWhite, appearance.effect != .off {
-                    Text("Near-white — the pad rests white, so this reads as unlit.")
+                    Text(tr("Casi blanco — el pad reposa en blanco, así que parecerá apagado."))
                         .font(.system(size: 10.5, weight: .medium))
                         .foregroundStyle(Color(RGB(0xFF6A00)))
                 }
@@ -477,51 +517,51 @@ private struct StateRow: View {
 
             Spacer(minLength: 8)
 
-            Picker("", selection: effectBinding) {
+            Picker("", selection: $appearance.effect) {
                 // The spatial effects are not offered: snake and gradient only mean
                 // anything on the multi-LED ring and render a single key dark.
                 ForEach([LEDEffect.solid, .breath, .shallowBreath, .rainbow, .off], id: \.self) {
-                    Text($0.rawValue).tag($0)
+                    Text($0.displayName).tag($0)
                 }
             }
             .labelsHidden()
             .frame(width: 130)
 
-            Slider(value: brightnessBinding, in: 0...1).frame(width: 90)
+            Slider(value: $appearance.brightness, in: 0...1).frame(width: 90)
 
-            Button { commands.previewState(state) } label: {
+            Button { preview?() } label: {
                 Image(systemName: "play.fill").font(.system(size: 9))
             }
             .buttonStyle(.borderless)
-            .help("Show this state on the pad")
+            .help(tr("Mostrar este estado en el pad"))
+            .opacity(preview == nil ? 0 : 1)
+            .disabled(preview == nil)
         }
         .padding(.vertical, 7)
     }
-
-    private var effectBinding: Binding<LEDEffect> {
-        Binding(get: { appearance.effect }, set: { effect in update { $0.effect = effect } })
-    }
-
-    private var brightnessBinding: Binding<Double> {
-        Binding(get: { appearance.brightness }, set: { value in update { $0.brightness = value } })
-    }
-
-    private func update(_ change: (inout Appearance) -> Void) {
-        var next = appearance
-        change(&next)
-        board.appearances[state] = next
-        commands.bindingsChanged()
-    }
 }
 
-/// The color itself: presets, hex, and speed when the effect moves.
-private struct ColorEditor: View {
-    @EnvironmentObject private var board: BoardModel
-    @Environment(\.boardCommands) private var commands
+/**
+ The color itself: presets, hex, and speed when the effect moves.
 
-    let state: SessionState
+ Internal, not private: the Superset and Workspaces panes pick hardware colors too (the
+ confirmation light, the workspace palette), and a second editor would be a second
+ set of presets to keep in step. It edits bindings, not a state, for the same reason.
+ */
+struct ColorEditor: View {
+    let title: String
+    @Binding var color: RGB
+    /// Shown when the effect animates; `nil` hides the slider.
+    var speed: Binding<Double>?
+
     @State private var hexDraft = ""
     @FocusState private var hexFocused: Bool
+
+    init(title: String, color: Binding<RGB>, speed: Binding<Double>? = nil) {
+        self.title = title
+        self._color = color
+        self.speed = speed
+    }
 
     /// The hardware legend, plus a few useful neighbours.
     ///
@@ -529,25 +569,21 @@ private struct ColorEditor: View {
     /// vocabulary is built on — and because picking "roughly orange" off a wheel is how
     /// `awaiting` stops being unmistakable.
     private static let presets: [(name: String, rgb: RGB)] = [
-        ("Slate", RGB(0x2E4A6B)),
-        ("Blue", RGB(0x0C47E9)),
-        ("Orange", RGB(0xFF6A00)),
-        ("Green", RGB(0x09B821)),
-        ("Crimson", RGB(0xD41145)),
-        ("Violet", RGB(0x7B2FF7)),
-        ("Cyan", RGB(0x00C8D7)),
-        ("Amber", RGB(0xFFB300)),
+        ("Pizarra", RGB(0x2E4A6B)),
+        ("Azul", RGB(0x0C47E9)),
+        ("Naranja", RGB(0xFF6A00)),
+        ("Verde", RGB(0x09B821)),
+        ("Carmesí", RGB(0xD41145)),
+        ("Violeta", RGB(0x7B2FF7)),
+        ("Cian", RGB(0x00C8D7)),
+        ("Ámbar", RGB(0xFFB300)),
         ("Magenta", RGB(0xE81CA8)),
-        ("Off-black", RGB(0x000000)),
+        ("Negro", RGB(0x000000)),
     ]
-
-    private var appearance: Appearance {
-        board.appearances[state] ?? state.defaultAppearance
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(state.label).font(.system(size: 12.5, weight: .semibold))
+            Text(title).font(.system(size: 12.5, weight: .semibold))
 
             LazyVGrid(
                 columns: Array(repeating: GridItem(.fixed(24), spacing: 8), count: 5),
@@ -560,7 +596,7 @@ private struct ColorEditor: View {
                     // over the preset just picked — the click appears to not take,
                     // in either blur-then-click order.
                     Button {
-                        update { $0.color = preset.rgb }
+                        color = preset.rgb
                         hexDraft = preset.rgb.hex
                     } label: {
                         RoundedRectangle(cornerRadius: 5)
@@ -569,14 +605,14 @@ private struct ColorEditor: View {
                             .overlay(
                                 RoundedRectangle(cornerRadius: 5)
                                     .strokeBorder(
-                                        appearance.color == preset.rgb
+                                        color == preset.rgb
                                             ? Color.primary : .black.opacity(0.25),
-                                        lineWidth: appearance.color == preset.rgb ? 2 : 0.5
+                                        lineWidth: color == preset.rgb ? 2 : 0.5
                                     )
                             )
                     }
                     .buttonStyle(.plain)
-                    .help(preset.name)
+                    .help(tr(preset.name))
                 }
             }
 
@@ -595,20 +631,20 @@ private struct ColorEditor: View {
                 // to the current color while the draft is not yet a parseable hex,
                 // so a half-typed value reads as "no change yet" rather than black.
                 RoundedRectangle(cornerRadius: 5)
-                    .fill(Color(RGB(hex: hexDraft) ?? appearance.color))
+                    .fill(Color(RGB(hex: hexDraft) ?? color))
                     .frame(width: 24, height: 24)
                     .overlay(
                         RoundedRectangle(cornerRadius: 5)
                             .strokeBorder(.black.opacity(0.25), lineWidth: 0.5)
                     )
-                    .help("Preview of the hex value")
+                    .help(tr("Previsualización del valor hex"))
             }
 
-            if appearance.effect.isAnimated {
+            if let speed {
                 HStack(spacing: 8) {
-                    Text("Speed").font(.system(size: 11.5)).foregroundStyle(.secondary)
-                    Slider(value: speedBinding, in: 0...1).frame(width: 110)
-                    Text("\(Int(appearance.speed * 100))%")
+                    Text(tr("Velocidad")).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    Slider(value: speed, in: 0...1).frame(width: 110)
+                    Text("\(Int(speed.wrappedValue * 100))%")
                         .font(.system(size: 11).monospaced())
                         .foregroundStyle(.secondary)
                         .frame(width: 34, alignment: .trailing)
@@ -616,34 +652,23 @@ private struct ColorEditor: View {
             }
         }
         .frame(width: 214)
-        .onAppear { hexDraft = appearance.color.hex }
-        .onChange(of: appearance.color) { _, new in
+        .onAppear { hexDraft = color.hex }
+        .onChange(of: color) { _, new in
             if !hexFocused { hexDraft = new.hex }
         }
     }
 
     private func commitHex() {
         guard let parsed = RGB(hex: hexDraft) else {
-            hexDraft = appearance.color.hex
+            hexDraft = color.hex
             return
         }
         // A draft that matches the current color is not an edit — it is the seed, or
         // a preset click that already synced it. Writing it anyway is how a blur
         // used to overwrite a preset pick with the value the field was seeded with.
-        guard parsed != appearance.color else { return }
-        update { $0.color = parsed }
+        guard parsed != color else { return }
+        color = parsed
         hexDraft = parsed.hex
-    }
-
-    private var speedBinding: Binding<Double> {
-        Binding(get: { appearance.speed }, set: { value in update { $0.speed = value } })
-    }
-
-    private func update(_ change: (inout Appearance) -> Void) {
-        var next = appearance
-        change(&next)
-        board.appearances[state] = next
-        commands.bindingsChanged()
     }
 }
 

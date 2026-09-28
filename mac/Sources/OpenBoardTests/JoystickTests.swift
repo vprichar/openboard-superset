@@ -22,6 +22,12 @@ func runJoystickTests() {
         expect(Joystick.parse(Data(#"{"m":"v.oai.hid","p":{"k":"AG00","act":1}}"#.utf8)) == nil)
         expect(Joystick.parse(Data(#"{"ok":1,"id":7}"#.utf8)) == nil)
         expect(Joystick.parse(Data("not json".utf8)) == nil)
+
+        // The clone spells the envelope out.
+        let clone = try Harness.require(
+            Joystick.parse(Data(#"{"method":"v.oai.rad","params":{"a":0.25,"d":1.00}}"#.utf8))
+        )
+        expectEqual(clone.angle, 0.25)
     }
 
     test("the four captured clusters map to four distinct directions") {

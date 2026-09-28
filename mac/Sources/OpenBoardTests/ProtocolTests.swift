@@ -188,6 +188,22 @@ func runProtocolTests() {
         expectEqual(tick.action, .tick)
     }
 
+    test("the clone's spelled-out method/params envelope parses too") {
+        // Captured verbatim from the ESP32-S3 clone, which does not abbreviate.
+        let down = try Harness.require(
+            KeyEvent.parse(Data(#"{"method":"v.oai.hid","params":{"k":"AG03","act":1,"ag":3}}"#.utf8))
+        )
+        expectEqual(down.key, "AG03")
+        expectEqual(down.action, .down)
+
+        let tick = try Harness.require(
+            KeyEvent.parse(Data(#"{"method":"v.oai.hid","params":{"k":"ENC_CC","act":2}}"#.utf8))
+        )
+        expectEqual(tick.action, .tick)
+
+        expect(KeyEvent.parse(Data(#"{"id":7,"result":true}"#.utf8)) == nil)
+    }
+
     test("our own acknowledgements are not mistaken for key presses") {
         // Replies carry `result`, not `m`. Confusing the two would fire an action for
         // every LED write we make.

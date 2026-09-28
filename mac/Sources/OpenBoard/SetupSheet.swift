@@ -30,6 +30,9 @@ struct SetupSheet: View {
     /// request returns denied instantly. Asking a second time is guaranteed to fail, so
     /// the button has to stop offering and point at the only thing that can undo it.
     @State private var automationRefused = false
+    /// Read so a language change rebuilds the whole sheet: every string is resolved
+    /// when the body runs, and `.id` below forces that for the subviews too.
+    @AppStorage(UIStrings.defaultsKey) private var uiLanguage = UIStrings.defaultLanguage.rawValue
 
     private var progress: SetupProgress { setup.progress }
 
@@ -52,6 +55,7 @@ struct SetupSheet: View {
             footer
         }
         .frame(width: 520)
+        .id(uiLanguage)
         // Re-read on every appearance: these are granted outside the app, and a stale
         // list is what sends someone back to System Settings to fix something they
         // already fixed.
@@ -69,20 +73,18 @@ struct SetupSheet: View {
          Fires once ever, tracked by a marker in the state directory. A congratulation
          that reappears is not a congratulation.
         */
-        .alert("OpenBoard is set up", isPresented: $setup.justCompleted) {
-            Button("Map your keys") {
+        .alert(tr("OpenBoard está configurado"), isPresented: $setup.justCompleted) {
+            Button(tr("Asignar tus teclas")) {
                 setup.markCompletionSeen()
                 dismiss()
                 commands.openSettings()
             }
-            Button("Later", role: .cancel) {
+            Button(tr("Más tarde"), role: .cancel) {
                 setup.markCompletionSeen()
                 dismiss()
             }
         } message: {
-            Text("The pad is live and your sessions will report to it. "
-                 + "Next: choose what each key does and how it looks — that part is "
-                 + "entirely yours.")
+            Text(tr("El pad está en vivo y tus sesiones le informarán. Siguiente: elige qué hace cada tecla y cómo se ve; esa parte es toda tuya."))
         }
     }
 
@@ -90,12 +92,12 @@ struct SetupSheet: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(progress.isReady ? "OpenBoard is ready" : "Set up OpenBoard")
+            Text(progress.isReady ? tr("OpenBoard está listo") : tr("Configura OpenBoard"))
                 .font(.system(size: 16, weight: .semibold))
             Text(progress.isReady
-                 ? "Everything it needs is granted. Open a new Claude Code session and the keys will light."
-                 : "\(progress.requiredDone) of \(progress.requiredTotal) done. "
-                   + "Each takes a few seconds, and you can stop and come back.")
+                 ? tr("Todo lo que necesita está concedido. Abre una sesión nueva de Claude Code y las teclas se iluminarán.")
+                 : tr("%ld de %ld hechos. Cada uno lleva unos segundos, y puedes parar y volver luego.",
+                      progress.requiredDone, progress.requiredTotal))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -117,7 +119,7 @@ struct SetupSheet: View {
                 HStack(spacing: 6) {
                     Text(title(step)).font(.system(size: 13, weight: .medium))
                     if !step.isRequired {
-                        Text("optional")
+                        Text(tr("opcional"))
                             .font(.system(size: 10.5))
                             .foregroundStyle(.tertiary)
                     }
@@ -130,7 +132,7 @@ struct SetupSheet: View {
                 // Said on the row rather than in a dialog afterwards, because it is the
                 // reason a grant looks like it did nothing.
                 if step.needsRestart && !done {
-                    Text("Takes effect after OpenBoard restarts.")
+                    Text(tr("Se aplica al reiniciar OpenBoard."))
                         .font(.system(size: 11))
                         .foregroundStyle(Color(RGB(0xFF6A00)))
                 }
@@ -146,17 +148,17 @@ struct SetupSheet: View {
     private func action(_ step: SetupProgress.Step, done: Bool) -> some View {
         switch step {
         case .inputMonitoring:
-            Button("Open") { openPane("Privacy_ListenEvent") }.controlSize(.small)
+            Button(tr("Abrir")) { openPane("Privacy_ListenEvent") }.controlSize(.small)
         case .accessibility:
-            Button("Open") { openPane("Privacy_Accessibility") }.controlSize(.small)
+            Button(tr("Abrir")) { openPane("Privacy_Accessibility") }.controlSize(.small)
         case .automation:
             // Normally the only step the app can grant without sending anyone anywhere.
             // A recorded refusal takes that away: macOS will not re-prompt, so the
             // button changes to the one action that can still work.
             if automationRefused && !done {
-                Button("Open") { openPane("Privacy_Automation") }.controlSize(.small)
+                Button(tr("Abrir")) { openPane("Privacy_Automation") }.controlSize(.small)
             } else {
-                Button(working ? "Asking" : "Grant") { grantAutomation() }
+                Button(working ? tr("Preguntando") : tr("Conceder")) { grantAutomation() }
                     .controlSize(.small)
                     .disabled(working || done)
             }
@@ -164,11 +166,11 @@ struct SetupSheet: View {
             // Needs the pad open, because the check paints six colours on it. Disabled
             // rather than hidden: it is a real step, and hiding it would make the count
             // shrink and grow as the pad connects.
-            Button(done ? "Re-check" : "Check") { calibrating = true }
+            Button(done ? tr("Volver a comprobar") : tr("Comprobar")) { calibrating = true }
                 .controlSize(.small)
                 .disabled(!board.device.isUsable)
         case .hooks:
-            Button(done ? "Re-wire" : "Wire up") { wireHooks() }
+            Button(done ? tr("Reinstalar") : tr("Instalar")) { wireHooks() }
                 .controlSize(.small)
                 .disabled(working)
         case .openAtLogin:
@@ -185,37 +187,31 @@ struct SetupSheet: View {
 
     private func title(_ step: SetupProgress.Step) -> String {
         switch step {
-        case .inputMonitoring: "Input Monitoring"
-        case .accessibility: "Accessibility"
-        case .automation: "Automation"
-        case .calibration: "Key order"
-        case .hooks: "Claude Code hooks"
-        case .openAtLogin: "Open at login"
+        case .inputMonitoring: permissionName("Input Monitoring")
+        case .accessibility: permissionName("Accessibility")
+        case .automation: permissionName("Automation")
+        case .calibration: tr("Orden de teclas")
+        case .hooks: tr("Hooks de Claude Code")
+        case .openAtLogin: tr("Abrir al iniciar sesión")
         }
     }
 
     private func detail(_ step: SetupProgress.Step) -> String {
         switch step {
         case .inputMonitoring:
-            "Reading the pad. Without it nothing lights and no key press is seen."
+            tr("Leer el pad. Sin él no se ilumina nada y no se detecta ninguna pulsación.")
         case .accessibility:
-            "Typing snippets, sending ⏎ and ⎋, and scrolling with the dial."
+            tr("Escribir textos, enviar ⏎ y ⎋ y desplazarse con el dial.")
         case .automation:
-            "Driving System Events, which the key actions use. OpenBoard asks macOS "
-                + "directly — no trip to System Settings."
+            tr("Controlar System Events, que es lo que usan las teclas de acción. OpenBoard se lo pide directamente a macOS, sin pasar por Ajustes del Sistema.")
         case .calibration:
             board.device.isUsable
-                ? "Confirms which physical key is slot 1. The board assumes the order "
-                    + "every pad reports, so this takes ten seconds — but colours and "
-                    + "bindings are set per slot, and an unchecked order puts them on "
-                    + "the wrong keys."
-                : "Connect the pad first — the check paints six colours on it."
+                ? tr("Confirma qué tecla física es la posición 1. El tablero asume el orden que reportan todos los pads, así que esto lleva diez segundos; pero los colores y las asignaciones van por posición, y un orden sin comprobar los pone en las teclas equivocadas.")
+                : tr("Conecta antes el pad: la comprobación pinta seis colores en él.")
         case .hooks:
-            "Adds OpenBoard to ~/.claude/settings.json so sessions report what they "
-                + "are doing. Every unrelated setting is preserved and the file is "
-                + "backed up first."
+            tr("Añade OpenBoard a ~/.claude/settings.json para que las sesiones informen de lo que hacen. Se conservan los demás ajustes y antes se respalda el archivo.")
         case .openAtLogin:
-            "A board you have to remember to launch is not an ambient board."
+            tr("Un tablero que tienes que acordarte de abrir no es un tablero ambiental.")
         }
     }
 
@@ -233,22 +229,21 @@ struct SetupSheet: View {
             // Two things this cannot check, and both are on the hardware. Stated rather
             // than shown as boxes that would sit unticked forever.
             VStack(alignment: .leading, spacing: 3) {
-                Text("On the pad itself")
+                Text(tr("En el propio pad"))
                     .font(.system(size: 11.5, weight: .medium))
-                Text("Pair the Codex Micro with this Mac over Bluetooth or USB, and keep "
-                     + "it on Layer 1 — per-key status renders only there.")
+                Text(tr("Empareja el Codex Micro con este Mac por Bluetooth o USB y mantenlo en la capa 1: el estado por tecla solo se muestra ahí."))
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
             HStack(spacing: 8) {
-                Button("Check again", action: refresh)
+                Button(tr("Comprobar de nuevo"), action: refresh)
                     .controlSize(.small)
                 if !progress.isReady, !setup.isSkipped {
                     // Not a step and not a finish — an exit. The checklist survives
                     // it untouched; only the walls come down.
-                    Button("Skip for now", action: skipAndClose)
+                    Button(tr("Omitir por ahora"), action: skipAndClose)
                         .controlSize(.small)
                 }
                 Spacer(minLength: 0)
@@ -256,10 +251,10 @@ struct SetupSheet: View {
                     // Offered here because two of the four need it, and hunting for the
                     // menu bar item to quit and reopen is a poor reward for granting a
                     // permission correctly.
-                    Button("Restart OpenBoard", action: restart)
+                    Button(tr("Reiniciar OpenBoard"), action: restart)
                         .controlSize(.small)
                 }
-                Button(progress.isReady ? "Done" : "Close") { dismiss() }
+                Button(progress.isReady ? tr("Listo") : tr("Cerrar")) { dismiss() }
                     .controlSize(.small)
                     .keyboardShortcut(.defaultAction)
             }
@@ -301,15 +296,11 @@ struct SetupSheet: View {
                 // The specific case that had no message of its own. Saying "was not
                 // granted" invited another click, and another click cannot work.
                 automationRefused = true
-                note = "macOS has a refusal on record for System Events, so it will not "
-                    + "ask again. Turn OpenBoard on under Automation in System Settings, "
-                    + "then come back and press Check again."
+                note = tr("macOS tiene registrada una negativa para System Events, así que no volverá a preguntar. Activa OpenBoard en Automatización, en Ajustes del Sistema, y luego vuelve y pulsa Comprobar de nuevo.")
             case .unavailable:
-                note = "System Events would not start, so macOS had nothing to ask "
-                    + "about. Try again in a moment."
+                note = tr("System Events no se inició, así que macOS no tenía nada que preguntar. Vuelve a intentarlo en un momento.")
             case .unknown:
-                note = "No answer was given. Press Grant again and choose OK in the "
-                    + "dialog macOS shows."
+                note = tr("No hubo respuesta. Pulsa Conceder otra vez y acepta en el diálogo que muestra macOS.")
             }
         }
     }
@@ -317,8 +308,7 @@ struct SetupSheet: View {
     private func wireHooks() {
         do {
             try HookInstall.install(command: HookInstall.hookCommandPath())
-            note = "Hooks wired. Open a new Claude Code session to see it — they load "
-                + "when a session starts, so ones already running will not light."
+            note = tr("Hooks instalados. Abre una sesión nueva de Claude Code para verlo: se cargan al iniciar la sesión, así que las que ya están en marcha no se iluminarán.")
         } catch {
             note = error.localizedDescription
         }

@@ -26,10 +26,17 @@ struct DevicePane: View {
     @State private var automationNote: String?
     @State private var keybinding = KeybindingInstall.Audit(status: .missing, fileExists: false)
     @State private var chordNote: String?
+    /// The interface language. Written here for SwiftUI, and through
+    /// `UIStrings.storedLanguage` for everything else — see `languageBinding`.
+    @AppStorage(UIStrings.defaultsKey) private var uiLanguage = UIStrings.defaultLanguage.rawValue
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                // First, because someone who cannot read the rest has to find it
+                // without reading the rest.
+                languageSection
+
                 HStack(spacing: 10) {
                     Circle()
                         .fill(board.device.isUsable ? Color(RGB(0x09B821)) : Color(RGB(0xD41145)))
@@ -48,21 +55,21 @@ struct DevicePane: View {
 
                 // Kept: someone grants a permission, comes back, sees no change, and
                 // concludes the app is broken.
-                PaneHeader("Permissions", "Each takes effect after OpenBoard restarts.")
+                PaneHeader(tr("Permisos"), tr("Cada uno se aplica al reiniciar OpenBoard."))
                 VStack(spacing: 0) {
                     permissionRow(
-                        "Input Monitoring", "reading the pad — all lighting and every key",
+                        "Input Monitoring", tr("leer el pad: toda la iluminación y cada tecla"),
                         status: permissions.inputMonitoring, pane: "Privacy_ListenEvent"
                     )
                     permissionRow(
-                        "Accessibility", "typing snippets, sending ⏎ and ⎋, scrolling",
+                        "Accessibility", tr("escribir textos, enviar ⏎ y ⎋, desplazarse"),
                         status: permissions.accessibility, pane: "Privacy_Accessibility"
                     )
                     // Separate from Input Monitoring, even though both are "talking to
                     // the pad": the battery is read as a Bluetooth central, and macOS
                     // gates that on its own.
                     permissionRow(
-                        "Bluetooth", "reading the pad's battery level",
+                        "Bluetooth", tr("leer el nivel de batería del pad"),
                         status: permissions.bluetooth, pane: "Privacy_Bluetooth"
                     )
                     // iTerm2's row would nag anyone who does not use iTerm2 at all.
@@ -103,7 +110,7 @@ struct DevicePane: View {
                      Only on success. A failure already has an answer on screen: the row
                      that is not green, and the list beside this button.
                      */
-                    Button("Check now") {
+                    Button(tr("Comprobar ahora")) {
                         permissions = PermissionProbe.inspect()
                         allGranted = permissions.missing.isEmpty
                     }
@@ -130,19 +137,16 @@ struct DevicePane: View {
                      targets have answered the button is not a control, it is a leftover.
                      */
                     if !automationSettled {
-                        Button(requestingAutomation ? "Asking" : "Grant permissions") {
+                        Button(requestingAutomation ? tr("Preguntando") : tr("Conceder permisos")) {
                             requestAutomation()
                         }
                         .controlSize(.small)
                         .disabled(requestingAutomation)
-                        .help("Asks macOS for permission to drive System Events and the "
-                            + "terminals press-to-jump raises — Terminal, and iTerm2 when "
-                            + "installed. QuickTime is not included — fun mode asks for "
-                            + "that itself the first time you play it.")
+                        .help(tr("Pide a macOS permiso para controlar System Events y las terminales a las que salta una tecla: Terminal, e iTerm2 si está instalado. QuickTime no se incluye: el modo diversión lo pide por su cuenta la primera vez que lo reproduces."))
                     }
 
                     if !permissions.missing.isEmpty {
-                        Text("Missing: \(permissions.missing.joined(separator: ", "))")
+                        Text(tr("Faltan: %@", permissions.missing.map(permissionName).joined(separator: ", ")))
                             .font(.system(size: 11))
                             .foregroundStyle(Color(RGB(0xFF6A00)))
                     }
@@ -181,13 +185,13 @@ struct DevicePane: View {
                     hooksProblem
                 }
 
-                PaneHeader("The voice key", "How a voice tap reaches Claude Code.")
+                PaneHeader(tr("La tecla de voz"), tr("Cómo llega un toque de voz a Claude Code."))
                 voiceChordSection
 
-                PaneHeader("Starting up", "Setting OpenBoard up, and keeping it running.")
+                PaneHeader(tr("Inicio"), tr("Configurar OpenBoard y mantenerlo en marcha."))
                 VStack(alignment: .leading, spacing: 8) {
                     Toggle(isOn: loginItemBinding) {
-                        Text("Open OpenBoard at login").font(.system(size: 12.5))
+                        Text(tr("Abrir OpenBoard al iniciar sesión")).font(.system(size: 12.5))
                     }
                     .toggleStyle(.switch)
                     .disabled(!LoginItem.isInstalledProperly)
@@ -195,13 +199,12 @@ struct DevicePane: View {
                     if !LoginItem.isInstalledProperly {
                         // Registration is tied to the bundle path, so a copy running
                         // from a build directory registers a path that will vanish.
-                        Text("Move OpenBoard to /Applications first — a login item "
-                            + "registered from anywhere else breaks when that folder changes.")
+                        Text(tr("Mueve antes OpenBoard a /Applications: un ítem de inicio registrado desde otro sitio falla cuando esa carpeta cambia."))
                             .font(.system(size: 11.5))
                             .foregroundStyle(Color(RGB(0xFF6A00)))
                             .fixedSize(horizontal: false, vertical: true)
                     } else if loginStatus == .awaitingApproval {
-                        Text("Waiting for approval in System Settings → General → Login Items.")
+                        Text(tr("Esperando aprobación en Ajustes del Sistema → General → Ítems de inicio."))
                             .font(.system(size: 11.5))
                             .foregroundStyle(Color(RGB(0xFF6A00)))
                     } else if case let .unavailable(reason) = loginStatus {
@@ -221,21 +224,21 @@ struct DevicePane: View {
                     // would leave the capture sheet as code nothing calls, which is how
                     // four separate bugs got into this app.
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Key order").font(.system(size: 12.5))
+                        Text(tr("Orden de teclas")).font(.system(size: 12.5))
                         Text(calibrationStatus)
                             .font(.system(size: 11.5))
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
 
                         HStack(spacing: 8) {
-                            Button(board.isCalibrationConfirmed ? "Recalibrate" : "Check key order") {
+                            Button(board.isCalibrationConfirmed ? tr("Recalibrar") : tr("Comprobar orden de teclas")) {
                                 calibrating = true
                             }
                             .controlSize(.small)
                             .disabled(!board.device.isUsable)
 
                             if !board.device.isUsable {
-                                Text("Connect the pad first.")
+                                Text(tr("Conecta antes el pad."))
                                     .font(.system(size: 11)).foregroundStyle(.secondary)
                             }
                         }
@@ -246,10 +249,10 @@ struct DevicePane: View {
                 // Before Files, not after. Files is reference and this is actionable,
                 // and the actionable thing should not sit below the list of paths
                 // nobody scrolls past.
-                PaneHeader("Version", "Which build this is, and how it gets a newer one.")
+                PaneHeader(tr("Versión"), tr("Qué compilación es y cómo se actualiza."))
                 updateSection
 
-                PaneHeader("Files", "Where your settings and log are kept.")
+                PaneHeader(tr("Archivos"), tr("Dónde se guardan tus ajustes y el registro."))
                 configFileSection
             }
             .padding(22)
@@ -262,8 +265,8 @@ struct DevicePane: View {
         // Everything, not just what lighting and keys need: someone checking after a
         // trip to System Settings wants to know the whole list is clear. A target that
         // is merely not running does not count against it — see PermissionProbe.Status.
-        .alert("All permissions granted", isPresented: $allGranted) {
-            Button("OK", role: .cancel) {}
+        .alert(tr("Todos los permisos concedidos"), isPresented: $allGranted) {
+            Button(tr("Aceptar"), role: .cancel) {}
         }
     }
 
@@ -282,21 +285,27 @@ struct DevicePane: View {
     private var calibrationStatus: String {
         let calibration = board.calibration
         if calibration.isAssumed {
-            return "Not checked. Running on the order every pad so far reports — "
-                + "slot 1 top-left, then reading order."
+            return tr("Sin comprobar. Se usa el orden que reportan todos los pads hasta ahora: posición 1 arriba a la izquierda y luego en orden de lectura.")
         }
 
+        // Dated in the interface language, not the system's, so the sentence and its
+        // date agree.
         let when = calibration.recordedAt.map {
-            " on " + $0.formatted(date: .abbreviated, time: .omitted)
-        } ?? ""
+            $0.formatted(
+                Date.FormatStyle(date: .abbreviated, time: .omitted)
+                    .locale(Locale(identifier: UIStrings.current.rawValue))
+            )
+        }
 
         guard calibration.isCustom else {
-            return "Checked\(when) — the standard order, slot 1 top-left."
+            return when.map { tr("Comprobado el %@: el orden estándar, posición 1 arriba a la izquierda.", $0) }
+                ?? tr("Comprobado: el orden estándar, posición 1 arriba a la izquierda.")
         }
         let moved = calibration.movedSlots
-            .map { "slot \($0.slot) → key \($0.key)" }
+            .map { tr("posición %ld → tecla %ld", $0.slot, $0.key) }
             .joined(separator: ", ")
-        return "Custom order recorded\(when): \(moved)."
+        return when.map { tr("Orden personalizado registrado el %@: %@.", $0, moved) }
+            ?? tr("Orden personalizado registrado: %@.", moved)
     }
 
     /**
@@ -353,18 +362,18 @@ struct DevicePane: View {
             let unanswered = changed.filter { $0.status != .granted && $0.status != .denied }
 
             var parts: [String] = []
-            if !granted.isEmpty { parts.append("Granted: \(granted.joined(separator: ", ")).") }
+            if !granted.isEmpty { parts.append(tr("Concedido: %@.", granted.joined(separator: ", "))) }
             if !refused.isEmpty {
-                parts.append("Refused: \(refused.joined(separator: ", ")) — "
-                    + "turn these on in System Settings → Privacy & Security → Automation.")
+                parts.append(tr("Denegado: %@. Actívalo en Ajustes del Sistema → Privacidad y seguridad → Automatización.",
+                                refused.joined(separator: ", ")))
             }
             if !unanswered.isEmpty {
                 // Dismissing the dialog without choosing, or a target that would not
                 // start. Neither is a decision, so the button stays available.
-                parts.append("No answer yet for \(unanswered.map(\.name).joined(separator: ", ")).")
+                parts.append(tr("Aún sin respuesta de %@.", unanswered.map(\.name).joined(separator: ", ")))
             }
             automationNote = parts.isEmpty
-                ? "Nothing to grant — everything OpenBoard needs is already allowed."
+                ? tr("Nada que conceder: todo lo que OpenBoard necesita ya está permitido.")
                 : parts.joined(separator: " ")
         }
     }
@@ -381,10 +390,10 @@ struct DevicePane: View {
      */
     private var configFileSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            fileRow("Settings", url: PreferencesStore.url())
-            fileRow("Log", url: Log.url)
+            fileRow(tr("Ajustes"), url: PreferencesStore.url())
+            fileRow(tr("Registro"), url: Log.url)
             // Kept: it names capabilities that exist nowhere else in the UI.
-            Text("Safe to hand-edit. Holds a few settings this window does not show.")
+            Text(tr("Se puede editar a mano. Guarda algunos ajustes que esta ventana no muestra."))
             .font(.system(size: 11.5))
             .foregroundStyle(.secondary)
             .fixedSize(horizontal: false, vertical: true)
@@ -414,7 +423,7 @@ struct DevicePane: View {
         let build = info?["CFBundleVersion"] as? String ?? "?"
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
-                Text("Version")
+                Text(tr("Versión"))
                     .font(.system(size: 11.5, weight: .medium))
                     .frame(width: 54, alignment: .leading)
                 Text("\(short) (\(build))")
@@ -442,13 +451,13 @@ struct DevicePane: View {
                         get: { commands.automaticUpdates() },
                         set: { commands.setAutomaticUpdates($0) }
                     )) {
-                        Text("Check for updates automatically").font(.system(size: 12.5))
+                        Text(tr("Buscar actualizaciones automáticamente")).font(.system(size: 12.5))
                     }
                     .toggleStyle(.switch)
 
                     Spacer(minLength: 0)
 
-                    Button(updater.status.updateVersion == nil ? "Check now" : "Install") {
+                    Button(updater.status.updateVersion == nil ? tr("Comprobar ahora") : tr("Instalar")) {
                         if updater.status.updateVersion == nil {
                             commands.checkForUpdates()
                         } else {
@@ -473,22 +482,22 @@ struct DevicePane: View {
     private var updateStatusText: String {
         switch updater.status {
         case .disabled:
-            return "This build cannot update itself — it was compiled locally."
+            return tr("Las actualizaciones están desactivadas en esta compilación del fork: recompílala para actualizar.")
         case .notChecked:
             // Sparkle remembers the last check across launches, so "not checked yet"
             // alone would be misleading the morning after one — the app has checked,
             // just not since it started.
-            guard let last = updater.lastCheck else { return "Not checked yet." }
-            return "Last checked \(Self.relative(last))."
+            guard let last = updater.lastCheck else { return tr("Aún sin comprobar.") }
+            return tr("Última comprobación: %@.", Self.relative(last))
         case .checking:
-            return "Checking"
+            return tr("Comprobando")
         case .available(let version):
-            return "Version \(version) is available."
+            return tr("La versión %@ está disponible.", version)
         case .upToDate:
-            guard let last = updater.lastCheck else { return "Up to date." }
-            return "Up to date — last checked \(Self.relative(last))."
+            guard let last = updater.lastCheck else { return tr("Al día.") }
+            return tr("Al día. Última comprobación: %@.", Self.relative(last))
         case .failed(let message):
-            return "Could not check: \(message)"
+            return tr("No se pudo comprobar: %@", message)
         }
     }
 
@@ -497,6 +506,9 @@ struct DevicePane: View {
     private static func relative(_ date: Date) -> String {
         let f = RelativeDateTimeFormatter()
         f.unitsStyle = .full
+        // The interface language, not the system's, so "3 minutes ago" matches the
+        // sentence it sits in.
+        f.locale = Locale(identifier: UIStrings.current.rawValue)
         return f.localizedString(for: date, relativeTo: Date())
     }
 
@@ -516,7 +528,7 @@ struct DevicePane: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 0)
-            Button("Reveal") {
+            Button(tr("Mostrar")) {
                 NSWorkspace.shared.activateFileViewerSelecting([url])
             }
             .controlSize(.small)
@@ -574,10 +586,8 @@ struct DevicePane: View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle(isOn: voiceChordBinding) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Tap ⌃Y instead of space").font(.system(size: 12.5))
-                    Text("Space types a space when the input already has text. "
-                        + "⌃Y starts dictation and types nothing — OpenBoard adds "
-                        + "the one-line binding to ~/.claude/keybindings.json for you.")
+                    Text(tr("Tocar ⌃Y en vez de espacio")).font(.system(size: 12.5))
+                    Text(tr("Espacio escribe un espacio si la entrada ya tiene texto. ⌃Y inicia el dictado y no escribe nada: OpenBoard añade por ti la línea del atajo a ~/.claude/keybindings.json."))
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -586,8 +596,7 @@ struct DevicePane: View {
             .toggleStyle(.switch)
 
             if board.preferences.voiceChord, case .conflict(let other) = keybinding.status {
-                Text("⌃Y is already bound to \(other) in your keybindings — the voice "
-                    + "key will do nothing until that binding is freed or changed here.")
+                Text(tr("⌃Y ya está asignado a %@ en tus keybindings: la tecla de voz no hará nada hasta que liberes ese atajo o lo cambies aquí.", other))
                     .font(.system(size: 11.5))
                     .foregroundStyle(Color(RGB(0xFF6A00)))
                     .fixedSize(horizontal: false, vertical: true)
@@ -614,9 +623,7 @@ struct DevicePane: View {
                             // Same caveat as hooks, same reason: keybindings load
                             // when a session starts, so the ones already open keep
                             // tapping into the void.
-                            chordNote = "Bound ⌃Y to voice:pushToTalk. New Claude Code "
-                                + "sessions pick it up — ones already open keep their "
-                                + "old bindings until restarted."
+                            chordNote = tr("⌃Y asignado a voice:pushToTalk. Las sesiones nuevas de Claude Code lo toman; las ya abiertas conservan sus atajos anteriores hasta que las reinicies.")
                         } catch {
                             chordNote = error.localizedDescription
                             refresh()
@@ -645,11 +652,13 @@ struct DevicePane: View {
             HStack(spacing: 10) {
                 Circle().fill(Color(RGB(0xFF6A00))).frame(width: 9, height: 9)
                 Text(hooks.settingsExists
-                    ? "\(hooks.problems.count) of \(HookInstall.events.count) hooks need attention."
-                    : "No ~/.claude/settings.json found.")
+                    ? (hooks.problems.count == 1
+                        ? tr("%ld de %ld hooks necesita atención.", hooks.problems.count, HookInstall.events.count)
+                        : tr("%ld de %ld hooks necesitan atención.", hooks.problems.count, HookInstall.events.count))
+                    : tr("No se encontró ~/.claude/settings.json."))
                     .font(.system(size: 12))
                 Spacer(minLength: 0)
-                Button("Repair hooks") {
+                Button(tr("Reparar hooks")) {
                     do {
                         try HookInstall.install(command: HookInstall.hookCommandPath())
                         // Naming the next step is the whole message. Hooks are read by
@@ -659,9 +668,7 @@ struct DevicePane: View {
                         // did not. Sessions already running do get a key (the app walks
                         // the process table), which makes it worse: they appear on the
                         // board and then never change.
-                        hookNote = "Wired. Open a new Claude Code session to see it — "
-                            + "hooks load when a session starts, so ones already running "
-                            + "will not light. The previous settings file is backed up beside it."
+                        hookNote = tr("Instalados. Abre una sesión nueva de Claude Code para verlo: los hooks se cargan al iniciar la sesión, así que las que ya están en marcha no se iluminarán. El archivo de ajustes anterior queda respaldado a su lado.")
                     } catch {
                         hookNote = error.localizedDescription
                     }
@@ -688,10 +695,10 @@ struct DevicePane: View {
 
     private func describe(_ status: HookInstall.EventStatus?) -> String {
         switch status {
-        case .missing, nil: "not wired"
-        case .stalePath(let path): "points at a binary that is gone — \(path)"
-        case .otherPath(let path): "points at another install — \(path)"
-        case .ok: "ok"
+        case .missing, nil: tr("sin instalar")
+        case .stalePath(let path): tr("apunta a un binario que ya no existe: %@", path)
+        case .otherPath(let path): tr("apunta a otra instalación: %@", path)
+        case .ok: tr("ok")
         }
     }
 
@@ -700,12 +707,12 @@ struct DevicePane: View {
     /// ⏎, and QuickTime only ever plays the countdown.
     private func why(automating target: String) -> String {
         switch target {
-        case "System Events": "typing snippets, ⏎ and ⎋, arrow keys"
-        case "Terminal": "jumping to a chat"
-        case "iTerm2": "jumping to a chat"
+        case "System Events": tr("escribir textos, ⏎ y ⎋, flechas")
+        case "Terminal": tr("saltar a un chat")
+        case "iTerm2": tr("saltar a un chat")
         // Names the feature, because that is the whole answer to "do I need this?".
-        case "QuickTime Player": "fun mode only — macOS asks the first time you play it"
-        default: "driving \(target)"
+        case "QuickTime Player": tr("solo modo diversión: macOS lo pide la primera vez que lo reproduces")
+        default: tr("controlar %@", target)
         }
     }
 
@@ -720,7 +727,7 @@ struct DevicePane: View {
                 .fill(color(for: status))
                 .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 1) {
-                Text(name).font(.system(size: 12.5, weight: .medium))
+                Text(permissionName(name)).font(.system(size: 12.5, weight: .medium))
                 Text(why).font(.system(size: 11)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
@@ -728,12 +735,12 @@ struct DevicePane: View {
             // macOS asks the first time the feature runs. "not running" invited people
             // to go and fix a permission that was never a problem.
             Text(optional && !status.isGranted && status != .denied
-                 ? "when needed"
+                 ? tr("cuando haga falta")
                  : label(for: status))
-                .font(.system(size: 11).monospaced())
+                .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-                .help(hint(for: status, name: subject ?? name) ?? "")
-            Button("Open") {
+                .help(hint(for: status, name: subject ?? permissionName(name)) ?? "")
+            Button(tr("Abrir")) {
                 if let url = PermissionProbe.settingsURL(forPane: pane) {
                     NSWorkspace.shared.open(url)
                 }
@@ -760,23 +767,73 @@ struct DevicePane: View {
 
     private func label(for status: PermissionProbe.Status) -> String {
         switch status {
-        case .granted: "granted"
-        case .denied: "denied"
-        case .unknown: "not asked"
+        case .granted: tr("concedido")
+        case .denied: tr("denegado")
+        case .unknown: tr("sin pedir")
         // Deliberately describes the *target*, not the permission: the permission is
         // very likely granted and simply cannot be read while the app is asleep.
-        case .unavailable: "not running"
+        case .unavailable: tr("inactivo")
         }
     }
 
     /// Only where it is not obvious. A row that explains itself does not need a tooltip.
     private func hint(for status: PermissionProbe.Status, name: String) -> String? {
         guard status == .unavailable else { return nil }
-        return "\(name) is not running, so macOS cannot be asked whether OpenBoard may "
-            + "drive it. It starts on demand — use a key that needs it and this resolves "
-            + "itself."
+        return tr("%@ no está en ejecución, así que no se puede preguntar a macOS si OpenBoard puede controlarlo. Se inicia cuando hace falta: usa una tecla que lo necesite y esto se resuelve solo.", name)
     }
 
+    /**
+     The interface language, in the same boxed-row shape as the voice key.
+
+     Each name is in its own language, as macOS does, so the control stays usable by
+     someone who cannot read the one currently showing.
+     */
+    private var languageSection: some View {
+        HStack(spacing: 10) {
+            Text(tr("Idioma")).font(.system(size: 12.5))
+            Spacer(minLength: 0)
+            Picker(tr("Idioma"), selection: languageBinding) {
+                ForEach(UILanguage.allCases, id: \.self) { language in
+                    Text(language.name).tag(language)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 10))
+    }
+
+    /// `@AppStorage` redraws SwiftUI; `storedLanguage` is the one persistence point and
+    /// the one that tells the menu bar.
+    private var languageBinding: Binding<UILanguage> {
+        Binding(
+            // The language in effect: the override when one is forced (snapshots),
+            // otherwise the stored choice this view observes.
+            get: { UIStrings.override ?? UILanguage(rawValue: uiLanguage) ?? UIStrings.defaultLanguage },
+            set: { language in
+                uiLanguage = language.rawValue
+                UIStrings.storedLanguage = language
+            }
+        )
+    }
+}
+
+/// Display name for a permission. `PermissionProbe` names them in English because tests
+/// and logic key on those strings; only what is shown is translated.
+func permissionName(_ en: String) -> String {
+    let automationPrefix = "Automation → "
+    if en.hasPrefix(automationPrefix) {
+        return tr("Automatización → %@", String(en.dropFirst(automationPrefix.count)))
+    }
+    switch en {
+    case "Input Monitoring": return tr("Monitorización de entrada")
+    case "Accessibility": return tr("Accesibilidad")
+    case "Automation": return tr("Automatización")
+    case "Screen Recording": return tr("Grabación de pantalla")
+    default: return en
+    }
 }
 
 struct ShowCard: View {
@@ -802,7 +859,7 @@ struct ShowCard: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.leading)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(String(format: "%.1fs", show.duration.seconds))
+                Text(String(format: "%.1f s", show.duration.seconds))
                     .font(.system(size: 10.5).monospaced())
                     .foregroundStyle(.tertiary)
             }

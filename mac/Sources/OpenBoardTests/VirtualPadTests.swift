@@ -136,6 +136,27 @@ func runVirtualPadTests() async {
         ])
     }
 
+    test("a virtual stick push reads as one real push, then rest") {
+        let samples = Collected()
+        pad.onLine { data in
+            if let reading = Joystick.parse(data) {
+                samples.add(line: "\(reading.angle),\(reading.deflection)")
+            }
+        }
+        pad.pushStick(angle: 0.5)
+        pad.pushStick(angle: 0.5)
+        expectEqual(samples.allLines, ["0.5,1.0", "0.0,0.0", "0.5,1.0", "0.0,0.0"])
+
+        // Through the same decision the hardware's samples go through: each push is
+        // exactly one direction, and the rest in between re-arms it.
+        var stick = Joystick()
+        let directions = samples.allLines.compactMap { line -> Joystick.Direction? in
+            let parts = line.split(separator: ",").compactMap { Double($0) }
+            return stick.update(angle: parts[0], deflection: parts[1])
+        }
+        expectEqual(directions, [.down, .down])
+    }
+
     test("the survey names a pad that is unmistakably not hardware") {
         let survey = VirtualPad.survey()
         expect(survey.found)

@@ -63,7 +63,8 @@ final class BoardModel: ObservableObject {
 
     /// Sessions blocked on a human, in slot order. Drives the popover's orange row
     /// and the status item's color — one source, so they cannot drift apart.
-    var blocked: [SlotView] { slots.filter { $0.state?.isAttention == true } }
+    /// A restored session not yet confirmed is not counted: see `Actions.respond`.
+    var blocked: [SlotView] { slots.filter { $0.state?.isAttention == true && !$0.isUnconfirmed } }
 
     /// Whether a person has actually confirmed the key order, as opposed to the board
     /// running on the layout every pad so far has reported.
@@ -72,6 +73,10 @@ final class BoardModel: ObservableObject {
     /// The whole configuration, so callers that need a value the model does not
     /// surface (decay timings, ambient mode, countdown) can reach it in one place.
     @Published private(set) var preferences: Preferences = .default
+
+    /// The host-service connection, as the Superset pane shows it. `.off` until the
+    /// client exists.
+    @Published var supersetLink: SupersetLinkState = .off
 
     init() {
         apply(PreferencesStore.shared.load())
@@ -173,6 +178,11 @@ struct SlotView: Identifiable, Equatable {
     /// The real working directory. `project` is its *display* form with the home
     /// directory shortened to `~`, which is not a path anything can open.
     var cwd: String?
+    /// The Superset workspace hosting this session. Set means the jump deep-links into
+    /// Superset rather than walking terminal ttys.
+    var supersetWorkspaceID: String?
+    /// The Superset terminal inside that workspace, so the jump lands on the right tab.
+    var supersetTerminalID: String?
 
     var id: Int { slot }
 
@@ -204,6 +214,28 @@ struct SlotView: Identifiable, Equatable {
     /// Whether this is the session in front of you. Set by the controller, which is the
     /// only thing that knows what the focus watcher last reported.
     var isFocused: Bool = false
+
+    /// The pad key showing this session, or nil when the pad is showing another
+    /// workspace. Not `slot`: in a workspace context key 2 can be slot 5.
+    var padKey: Int?
+    /// The workspace's folder for a Superset session, else the session's own folder.
+    var place: String?
+    /// Restored from disk and not yet confirmed by a live event (F1).
+    var isUnconfirmed: Bool = false
+
+    /// "key 2 · my-app" — what the popover and the log call this session.
+    var keyLabel: String { Self.keyLabel(padKey: padKey, place: place) }
+
+    static func keyLabel(padKey: Int?, place: String?) -> String {
+        let key = padKey.map { "key \($0)" } ?? "off the pad"
+        return place.map { "\(key) · \($0)" } ?? key
+    }
+
+    /// `keyLabel` in Spanish, for the popover. `keyLabel` stays English: the log reads it.
+    var displayKeyLabel: String {
+        let key = padKey.map { tr("tecla %ld", $0) } ?? tr("fuera del pad")
+        return place.map { "\(key) · \($0)" } ?? key
+    }
 
     var swatch: Color {
         guard let appearance, appearance.effect != .off else { return Color.secondary.opacity(0.28) }
@@ -271,39 +303,36 @@ enum DeviceStatus: Equatable {
     ///   here, because a status enum has no business knowing about preferences.
     func headline(_ name: String = "Codex Micro") -> String {
         switch self {
-        case .unknown: "Looking for the pad"
-        case .ready: "Connected to \(name)"
-        case .bluetoothDisconnected: "Not connected over Bluetooth"
-        case .bluetoothOff: "Bluetooth is off"
-        case .inUseElsewhere: "Something else is holding the pad"
-        case .secureInputBlocked: "Secure Keyboard Entry is blocking the pad"
-        case .permissionDenied: "macOS denied access"
-        case .notFound: "No \(name) found"
+        case .unknown: tr("Buscando el pad")
+        case .ready: tr("Conectado a %@", name)
+        case .bluetoothDisconnected: tr("Sin conexión por Bluetooth")
+        case .bluetoothOff: tr("El Bluetooth está desactivado")
+        case .inUseElsewhere: tr("Otra app está usando el pad")
+        case .secureInputBlocked: tr("La entrada segura de teclado bloquea el pad")
+        case .permissionDenied: tr("macOS denegó el acceso")
+        case .notFound: tr("No se encontró ningún %@", name)
         }
     }
 
     var message: String {
         switch self {
         case .unknown:
-            "Checking the HID interface."
+            tr("Comprobando la interfaz HID.")
         case .ready:
-            "Six keys, live."
+            tr("Seis teclas, en vivo.")
         case .bluetoothDisconnected:
-            "The Codex Micro is paired but not connected. Press any key on the pad to wake it — "
-                + "until then every color here is the last thing OpenBoard asked for, not what the pad is showing."
+            tr("El Codex Micro está enlazado pero no conectado. Pulsa cualquier tecla del pad para despertarlo; hasta entonces, cada color que ves aquí es lo último que pidió OpenBoard, no lo que muestra el pad.")
         case let .permissionDenied(missing):
-            "OpenBoard needs \(missing.joined(separator: " and ")). "
-                + "These are granted per app, and only take effect after the app is restarted."
+            tr("OpenBoard necesita %@. Se conceden por app y solo surten efecto después de reiniciarla.",
+                missing.map(permissionName).joined(separator: tr(" y ")))
         case .notFound:
-            "Connect the pad over USB or Bluetooth. If it is plugged in, check that it is on Layer 1."
+            tr("Conecta el pad por USB o Bluetooth. Si ya está conectado, comprueba que esté en la capa 1.")
         case .bluetoothOff:
-            "Bluetooth is switched off, so the pad cannot connect at all."
+            tr("El Bluetooth está desactivado, así que el pad no puede conectarse.")
         case .inUseElsewhere:
-            "The pad is here and OpenBoard is allowed to read it, but something else has it open. "
-                + "An older copy of OpenBoard still running is the usual cause."
+            tr("El pad está aquí y OpenBoard tiene permiso para leerlo, pero otra app lo tiene abierto. Lo habitual es que siga abierta una copia antigua de OpenBoard.")
         case let .secureInputBlocked(holder):
-            "\(holder) has engaged Secure Keyboard Entry, which blocks keyboard HID for every app. "
-                + "Your Input Monitoring grant is fine — finish or quit whatever engaged it and the pad comes back."
+            tr("%@ activó la entrada segura de teclado, que bloquea el HID de teclado para todas las apps. Tu permiso de Monitorización de entrada está bien: termina o cierra lo que la activó y el pad volverá.", holder)
         }
     }
 }

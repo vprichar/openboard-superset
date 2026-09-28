@@ -31,6 +31,8 @@ runSessionOriginTests()
 runTranscriptLocateTests()
 runProcessAncestryTests()
 runRowDetailTests()
+runPadViewTests()
+runSupersetFocusTests()
 
 // Hooks: the only way a session reaches the board.
 runHookTests()
@@ -79,9 +81,35 @@ runSettingsPersistenceTests()
 runITerm2SettingsUITests()
 runSuiteWiringTests()
 
+// Superset: the contracts, the host-service client and bus, and the key policies
+// built on them. Most are stubs until their package lands.
+runContractTests()
+runSnippetGuardTests()
+runEnterGuardTests()
+runLogRedactionTests()
+runProfileResolutionTests()
+runLongPressTests()
+runSupersetManifestTests()
+runSupersetHostClientTests()
+runSupersetBusTests()
+runReconcileTests()
+runPadWriteCoalescerTests()
+runPendingConfirmationTests()
+runNewAgentTests()
+runHandoffTests()
+runOldestWaitingTests()
+runTargetedSendTests()
+runInterruptTests()
+runTargetArmingTests()
+runSettingsEditingTests()
+runUIStringsTests()
+runSupersetSettingsTests()
+runLiveApplyTests()
+
 // Lighting behaviour.
 runAmbientTests()
 runLapTests()
+runWorkspaceTransitionTests()
 runCountdownTests()
 
 // Everything carried over from the Node version, unchanged on purpose.

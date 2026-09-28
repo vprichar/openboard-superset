@@ -26,6 +26,26 @@ func runSelectionColorTests() {
         }
     }
 
+    test("the new Board pane views take no hardcoded accent") {
+        // The profile, gesture and Remote views live between these markers; their
+        // highlights must come from the system (SystemColors), never a literal color.
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("OpenBoard/SettingsWindow.swift")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        guard let start = text.range(of: "// MARK: - Profiles, gestures and remote (F1, F2, F7)"),
+              let end = text.range(of: "// MARK: - End profiles, gestures and remote", range: start.upperBound..<text.endIndex)
+        else {
+            expect(false, "the new views' section markers are missing — the scan checks nothing")
+            return
+        }
+        let section = String(text[start.upperBound..<end.lowerBound])
+        expect(section.count > 500, "the marked section is suspiciously small")
+        for literal in ["RGB(0x", "Color(red:", "Color(.sRGB", ".accentColor", "Color.orange", "Color.blue", "Color.purple"] {
+            expect(!section.contains(literal), "new Board pane views hardcode \(literal)")
+        }
+    }
+
     // The values themselves are asserted once, in `runPortFidelityTests` — "LED colors
     // are the hardware values, not a palette". Restating the four hex strings here was
     // a second place to update for one decision, which is how a suite grows a test that
@@ -66,7 +86,7 @@ func runITerm2SettingsUITests() {
     }
 
     test("iTerm2's automation row explains itself like Terminal's") {
-        expect(settingsPanes.contains("case \"iTerm2\": \"jumping to a chat\""))
+        expect(settingsPanes.contains("case \"iTerm2\": tr(\"saltar a un chat\")"))
     }
 }
 
@@ -129,6 +149,19 @@ func runSettingsPersistenceTests() {
             silent.isEmpty,
             "these edits are never saved or applied:\n  " + silent.joined(separator: "\n  ")
         )
+    }
+
+    test("the Board pane's action pickers are grouped, and Tap/Hold is gated on action cells") {
+        let url = root.appendingPathComponent("SettingsWindow.swift")
+        let text = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+        expect(!text.isEmpty)
+        // A flat `ForEach(KeyAction.allCases` is the ungrouped picker coming back.
+        expect(!text.contains("ForEach(KeyAction.allCases"), "an action picker is not grouped by category")
+        expect(!text.contains("ForEach(KeyAction.forJoystick"), "the stick picker is not grouped by category")
+        expect(text.contains("SettingsEditing.pickerSections("), "the grouped sections are not used")
+        expect(text.contains("SettingsEditing.offersHold(cell)"), "Tap/Hold is not gated on the cell kind")
+        expect(text.contains("KeycapCatalog.selectable"), "the keycap picker still offers empty caps")
+        expect(text.contains(".confirmationDialog("), "allowing dangerous snippets does not ask first")
     }
 
     test("the check would actually notice a silent setter") {

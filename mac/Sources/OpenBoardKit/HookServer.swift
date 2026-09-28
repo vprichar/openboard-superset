@@ -101,6 +101,16 @@ public actor HookServer {
         /// cannot tell a human session from a subagent.
         public var environment: [String: String] { envValue }
 
+        /// The Superset workspace hosting this session, if it runs in Superset.
+        public var supersetWorkspaceID: String? {
+            envValue["SUPERSET_WORKSPACE_ID"].flatMap { $0.isEmpty ? nil : $0 }
+        }
+
+        /// The Superset terminal pane, if any. Not used for jumping yet.
+        public var supersetTerminalID: String? {
+            envValue["SUPERSET_TERMINAL_ID"].flatMap { $0.isEmpty ? nil : $0 }
+        }
+
         /// `type == "subagent"` ids from `background_tasks`, or empty if the array is
         /// absent/empty. Used to reconcile the delegation counter on every `Stop`.
         public var backgroundSubagentIDs: [String] {

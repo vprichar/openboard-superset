@@ -33,18 +33,17 @@ func runDispatcherTests() {
         )
     }
 
-    test("the wide keycap fires once, not twice") {
-        // ACT10 and ACT11 are two switches under one cap and report a few ms apart.
-        // Untreated this fired two actions per press — and when one held a key down,
-        // the other typed into it.
-        var dispatcher = KeyDispatcher()
+    test("ACT10 and ACT11 are separate keys on the clone") {
+        // The clone has separate mic and pencil caps, so ACT11 must not be folded into
+        // ACT10 — pressing the pencil would otherwise start dictation.
+        var dispatcher = KeyDispatcher(actions: ["ACT10": .voiceTap, "ACT11": .snippet])
         let first = dispatcher.intent(for: KeyEvent(key: "ACT10", action: .down), now: t0)
         let second = dispatcher.intent(
             for: KeyEvent(key: "ACT11", action: .down),
             now: t0.addingTimeInterval(0.007)
         )
         expectEqual(first, .action(.voiceTap, key: "ACT10"))
-        expect(second == nil, "the second switch of one keycap must be swallowed")
+        expectEqual(second, .action(.snippet, key: "ACT11"))
     }
 
     test("a repeat inside the debounce window is dropped") {
@@ -188,6 +187,67 @@ func runDispatcherTests() {
             dispatcher.intent(
                 for: KeyEvent(key: "ACT06", action: .down), now: t0.addingTimeInterval(0.01)
             ) != nil
+        )
+    }
+    test("a key with a long binding reports the press, not the action") {
+        // Tap or hold is not known yet; the controller times it (ActionPressTracker).
+        var dispatcher = KeyDispatcher()
+        dispatcher.longPressKeys = ["ACT07"]
+        expectEqual(
+            dispatcher.intent(for: KeyEvent(key: "ACT07", action: .down), now: t0),
+            .actionPressed(key: "ACT07")
+        )
+        expectEqual(
+            dispatcher.intent(for: KeyEvent(key: "ACT07", action: .up), now: t0.addingTimeInterval(0.2)),
+            .release(key: "ACT07")
+        )
+    }
+
+    test("a long-only key still reports the press") {
+        // NEW is unassigned on tap (D1) but holds to quick-create in Superset.
+        var dispatcher = KeyDispatcher(actions: [:])
+        dispatcher.longPressKeys = ["ACT11"]
+        expectEqual(
+            dispatcher.intent(for: KeyEvent(key: "ACT11", action: .down), now: t0),
+            .actionPressed(key: "ACT11")
+        )
+    }
+
+    test("a key without a long binding still fires its action on press") {
+        var dispatcher = KeyDispatcher()
+        dispatcher.longPressKeys = ["ACT07"]
+        expectEqual(
+            dispatcher.intent(for: KeyEvent(key: "ACT06", action: .down), now: t0),
+            .action(.approve, key: "ACT06")
+        )
+    }
+
+    test("a long-bound key is still debounced") {
+        var dispatcher = KeyDispatcher()
+        dispatcher.longPressKeys = ["ACT07"]
+        expect(dispatcher.intent(for: KeyEvent(key: "ACT07", action: .down), now: t0) != nil)
+        expect(
+            dispatcher.intent(for: KeyEvent(key: "ACT07", action: .down), now: t0.addingTimeInterval(0.1)) == nil
+        )
+    }
+
+    test("agent keys are unchanged by long bindings") {
+        // Jump on press, release discarded — even if a config names an agent key.
+        var dispatcher = KeyDispatcher()
+        dispatcher.longPressKeys = ["AG00", "ACT07"]
+        expectEqual(
+            dispatcher.intent(for: KeyEvent(key: "AG00", action: .down), now: t0),
+            .jump(slot: 1)
+        )
+        expect(dispatcher.intent(for: KeyEvent(key: "AG00", action: .up), now: t0.addingTimeInterval(0.6)) == nil)
+    }
+
+    test("the encoder click is unchanged by long bindings") {
+        var dispatcher = KeyDispatcher()
+        dispatcher.longPressKeys = ["ENC_CLK"]
+        expectEqual(
+            dispatcher.intent(for: KeyEvent(key: "ENC_CLK", action: .down), now: t0),
+            .encoderPressed
         )
     }
 }

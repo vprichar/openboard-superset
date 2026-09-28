@@ -24,6 +24,10 @@ public struct KeyDispatcher {
         /// The dial's button went down. Which action it means depends on how long it
         /// stays down, so the caller times it.
         case encoderPressed
+        /// An action cap with a long binding went down. Tap or hold is not known until
+        /// it comes back up or the threshold passes, so the caller times it
+        /// (`ActionPressTracker`). Caps without one still report `.action` on press.
+        case actionPressed(key: String)
     }
 
     /// Repeats of the same key inside this window are dropped.
@@ -37,6 +41,14 @@ public struct KeyDispatcher {
     public var actions: [String: KeyAction]
     /// What clicking the encoder does.
     public var encoderClick: KeyAction?
+    /**
+     Action caps that have a long-press binding with the current app in front — see
+     `ProfileResolver.longPressKeys`. Empty by default: every cap fires on press.
+
+     Only action caps are affected. Agent keys still jump on press and the encoder's
+     click is still reported as `.encoderPressed`, whatever this set holds.
+     */
+    public var longPressKeys: Set<String> = []
     /// Lines per encoder tick.
     public var scrollLines = 3
     /**
@@ -107,6 +119,9 @@ public struct KeyDispatcher {
         // this reports the edge.
         if key == Self.encoderClickKey {
             return .encoderPressed
+        }
+        if longPressKeys.contains(key) {
+            return .actionPressed(key: key)
         }
         guard let action = actions[key] else { return nil }
         return .action(action, key: key)

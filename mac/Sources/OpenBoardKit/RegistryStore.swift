@@ -19,6 +19,10 @@ import Foundation
    because pids are reused and a matching one after a reboot is coincidence
  - a **turn in progress** does not survive: `working` from a previous run means a turn
    that can no longer be running
+ - a **Superset terminal that is gone** (`disposed`, or with `ended_at`, in Superset's
+   own table) makes its session `ended`
+ - `awaiting`, `working` and `stalled` come back **unconfirmed**: the claim is kept,
+   flagged, and painted as a question until the first live event answers it
 
 `done` and the attention states *are* restored. A completion nobody has been back to is
 still unseen, and the app restarting says nothing about whether you saw it.
@@ -56,6 +60,14 @@ public struct RegistryStore: Sendable {
         var claimSeq: Int
         var claimedAt: Date
         var updatedAt: Date
+        // Optional, so documents written before these existed still decode.
+        var supersetWorkspaceID: String?
+        var supersetTerminalID: String?
+        /// Absent from documents written before the pad was sorted by it; those load
+        /// with their `claimSeq`, which is the order the sessions appeared in.
+        var boardOrder: Int?
+        /// Absent from older documents; those fall back to `updatedAt`.
+        var stateSince: Date?
     }
 
     // MARK: - reading
@@ -65,12 +77,16 @@ public struct RegistryStore: Sendable {
 
      - Parameter isAlive: injected so the reclaim rules are testable without spawning
        processes or depending on what happens to be running.
+     - Parameter liveness: what Superset's host database says about a terminal id
+       (`SupersetHostDatabase.terminalLiveness`). Only consulted for entries with a
+       `supersetTerminalID`; nil means no evidence, and changes nothing.
      */
     public static func load(
         url target: URL? = nil,
         staleInterval: TimeInterval = 12 * 3600,
         now: Date = Date(),
-        isAlive: (Int?) -> Bool = SessionRegistry.processIsAlive
+        isAlive: (Int?) -> Bool = SessionRegistry.processIsAlive,
+        liveness: (String) -> TerminalLiveness? = { _ in nil }
     ) -> SessionRegistry {
         var registry = SessionRegistry()
         guard let data = try? Data(contentsOf: target ?? url()) else { return registry }
@@ -92,6 +108,16 @@ public struct RegistryStore: Sendable {
             // same session, and restoring it would put a stranger on your board.
             guard now.timeIntervalSince(stored.updatedAt) < staleInterval else { continue }
 
+            // Superset's own table outranks the file: a terminal it disposed or ended
+            // is not coming back, whatever state was saved for it.
+            let terminalGone = stored.supersetTerminalID.flatMap(liveness).map {
+                $0 == .disposed || $0 == .ended
+            } ?? false
+            let restoredState = terminalGone
+                ? .ended
+                : settled(state, transcriptPath: stored.transcriptPath)
+            let stateSince = stored.stateSince ?? stored.updatedAt
+
             restored.append(SessionRegistry.Entry(
                 slot: stored.slot,
                 sessionID: stored.sessionID,
@@ -101,11 +127,16 @@ public struct RegistryStore: Sendable {
                 transcriptPath: stored.transcriptPath,
                 entrypoint: stored.entrypoint,
                 host: stored.host.flatMap(ProcessAncestry.Host.init(rawValue:)) ?? .unknown,
-                state: settled(state, transcriptPath: stored.transcriptPath),
+                state: restoredState,
                 pendingTool: nil,
                 claimSeq: stored.claimSeq,
+                boardOrder: stored.boardOrder ?? stored.claimSeq,
                 claimedAt: stored.claimedAt,
-                updatedAt: stored.updatedAt
+                updatedAt: stored.updatedAt,
+                stateSince: restoredState == state ? stateSince : now,
+                supersetWorkspaceID: stored.supersetWorkspaceID,
+                supersetTerminalID: stored.supersetTerminalID,
+                isUnconfirmed: !terminalGone && needsConfirmation(state)
             ))
         }
 
@@ -146,6 +177,21 @@ public struct RegistryStore: Sendable {
         }
     }
 
+    /**
+     Whether a saved state is a claim about the present that something live must
+     confirm before the pad shows it as fact.
+
+     A prompt, a running turn and a stall are all things that may have resolved while
+     the app was closed. `done` is a record of the past — an unseen completion stays
+     unseen — and `idle`/`ended`/`error` claim nothing that needs answering.
+     */
+    public static func needsConfirmation(_ saved: SessionState) -> Bool {
+        switch saved {
+        case .awaiting, .working, .stalled: return true
+        case .done, .idle, .ended, .error, .viewing: return false
+        }
+    }
+
     // MARK: - writing
 
     /// Persist the board. Atomic, mode 0600, and never fatal — losing the file costs
@@ -168,7 +214,11 @@ public struct RegistryStore: Sendable {
                     state: entry.state.rawValue,
                     claimSeq: entry.claimSeq,
                     claimedAt: entry.claimedAt,
-                    updatedAt: entry.updatedAt
+                    updatedAt: entry.updatedAt,
+                    supersetWorkspaceID: entry.supersetWorkspaceID,
+                    supersetTerminalID: entry.supersetTerminalID,
+                    boardOrder: entry.boardOrder,
+                    stateSince: entry.stateSince
                 )
             }
         )

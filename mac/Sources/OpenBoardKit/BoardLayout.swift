@@ -10,11 +10,11 @@ import Foundation
 
  Two details that look like mistakes and are not:
 
- - **`ACT10` and `ACT11` are one keycap.** Two switches under a single wide cap, so
-   pressing it reports both names within a few milliseconds. `ACT10` owns the binding
-   and `ACT11` is debounced into it; the cap renders once, spanning two cells. Left
-   untreated this fired two actions per press, and when one of them held a key down
-   the other typed into it.
+ - **`ACT10` and `ACT11` are separate keys on this build.** The genuine pad puts both
+   switches under one wide MIC cap and collapses them; the clone this fork targets has
+   three separate 1U keys on the bottom row (mic, pencil, terminal), so `ACT11` is its
+   own cell and independently bindable. `span`/`members` stay so a wide cap can be
+   described again.
  - **The joystick and touch sensor emit nothing.** They are drawn because the pad has
    them, not because they can be bound. A 25s capture with the joystick in constant
    use produced 113 encoder events and zero joystick events.
@@ -76,7 +76,7 @@ public enum BoardLayout {
     /// Row 1: dial, two session keys, stick
     /// Row 2: four session keys
     /// Row 3: four action keys
-    /// Row 4: touch, the double-width cap, one action key
+    /// Row 4: touch, then three single action keys (the clone's layout)
     public static let cells: [BoardCell] = [
         BoardCell(id: "ENC", kind: .element(.encoder)),
         BoardCell(id: "AG00", kind: .agent(slot: 1)),
@@ -94,7 +94,9 @@ public enum BoardLayout {
         BoardCell(id: "ACT09", kind: .action),
 
         BoardCell(id: "TOUCH", kind: .element(.touch)),
-        BoardCell(id: "ACT10", kind: .action, span: 2, members: ["ACT10", "ACT11"]),
+        // Clone layout: ACT10 and ACT11 are separate caps, not one wide MIC cap.
+        BoardCell(id: "ACT10", kind: .action),
+        BoardCell(id: "ACT11", kind: .action),
         BoardCell(id: "ACT12", kind: .action),
     ]
 
@@ -201,35 +203,55 @@ public enum KeyAction: String, CaseIterable, Sendable, Codable {
     case enter
     /// Replay a chord recorded in Settings — the payload is a `Shortcut`.
     case shortcut
+    /*
+     The Superset actions (Plan §2.5 + D10). Declared here so the picker, the config
+     reader and the tests agree on their names; each is wired into `BoardController`
+     by its own phase, and until then a key bound to one only logs that it is not.
+    */
+    /// A fresh agent in the focused workspace (`agents.run`, empty prompt).
+    case supersetNewAgent = "superset-new-agent"
+    /// Hand the focused terminal's context to another agent, after confirmation.
+    case supersetHandoff = "superset-handoff"
+    /// Jump to whichever session has been waiting on you the longest.
+    case jumpOldestWaiting = "jump-oldest-waiting"
+    /// ⎋ to the focused agent, through the host-service, after reading its screen.
+    case interruptFocused = "interrupt-focused"
+    /// Arm a remote send: the next agent key receives it, without jumping there.
+    case targetedArm = "targeted-arm"
 
     /// Short label, as the popover's keycap grid shows it.
     public var short: String {
         switch self {
-        case .sync: "repaint board"
-        case .settings: "open settings"
-        case .reset: "forget sessions"
-        case .off: "all keys off"
-        case .approve: "approve"
-        case .reject: "reject"
-        case .snippet: "type snippet"
-        case .newtab: "new Terminal tab"
-        case .newtabCmux: "new cmux tab"
-        case .newWorkspaceCmux: "new cmux workspace"
-        case .voiceTap: "tap to dictate"
-        case .voiceTalk: "hold to dictate"
-        case .voiceToggle: "toggle voice"
-        case .countdown: "fun mode"
-        case .popover: "open the menu"
-        case .tabForward: "next tab"
-        case .tabBack: "previous tab"
-        case .arrowUp: "arrow up"
-        case .arrowDown: "arrow down"
-        case .arrowLeft: "arrow left"
-        case .arrowRight: "arrow right"
-        case .prevSession: "previous session"
-        case .nextSession: "next session"
-        case .enter: "send ⏎"
-        case .shortcut: "custom shortcut"
+        case .sync: tr("repintar el tablero")
+        case .settings: tr("abrir Ajustes")
+        case .reset: tr("olvidar sesiones")
+        case .off: tr("apagar todas las teclas")
+        case .approve: tr("aprobar")
+        case .reject: tr("rechazar")
+        case .snippet: tr("escribir texto")
+        case .newtab: tr("nueva pestaña de Terminal")
+        case .newtabCmux: tr("nueva pestaña de cmux")
+        case .newWorkspaceCmux: tr("nuevo espacio de trabajo de cmux")
+        case .voiceTap: tr("tocar para dictar")
+        case .voiceTalk: tr("mantener para dictar")
+        case .voiceToggle: tr("activar o desactivar la voz")
+        case .countdown: tr("modo diversión")
+        case .popover: tr("abrir el menú")
+        case .tabForward: tr("pestaña siguiente")
+        case .tabBack: tr("pestaña anterior")
+        case .arrowUp: tr("flecha arriba")
+        case .arrowDown: tr("flecha abajo")
+        case .arrowLeft: tr("flecha izquierda")
+        case .arrowRight: tr("flecha derecha")
+        case .prevSession: tr("sesión anterior")
+        case .nextSession: tr("sesión siguiente")
+        case .enter: tr("enviar ⏎")
+        case .shortcut: tr("atajo personalizado")
+        case .supersetNewAgent: tr("agente nuevo")
+        case .supersetHandoff: tr("traspasar")
+        case .jumpOldestWaiting: tr("el que más espera")
+        case .interruptFocused: tr("interrumpir agente")
+        case .targetedArm: tr("envío remoto")
         }
     }
 
@@ -237,24 +259,29 @@ public enum KeyAction: String, CaseIterable, Sendable, Codable {
     /// has room to be spelled out.
     public var long: String {
         switch self {
-        case .approve: "approve pending prompt (⏎)"
-        case .reject: "reject pending prompt (⎋) / cancel fun mode"
-        case .snippet: "type snippet at cursor"
-        case .newtabCmux: "new cmux tab (in the workspace you are in)"
-        case .newWorkspaceCmux: "new cmux workspace (cmux's own ⌘N)"
-        case .voiceTalk: "hold to dictate (needs voice.mode=hold)"
-        case .countdown: "FUN MODE — play the video, lights follow"
-        case .popover: "open the menu bar dropdown"
-        case .tabForward: "next tab (⌘⇧])"
-        case .tabBack: "previous tab (⌘⇧[)"
-        case .arrowUp: "arrow up"
-        case .arrowDown: "arrow down"
-        case .arrowLeft: "arrow left"
-        case .arrowRight: "arrow right"
-        case .prevSession: "previous session"
-        case .nextSession: "next session"
-        case .enter: "send ⏎ to the focused window"
-        case .shortcut: "custom keyboard shortcut (recorded below)"
+        case .approve: tr("aprobar la solicitud pendiente (⏎)")
+        case .reject: tr("rechazar la solicitud pendiente (⎋) / cancelar el modo diversión")
+        case .snippet: tr("escribir texto en el cursor")
+        case .newtabCmux: tr("nueva pestaña de cmux (en el espacio de trabajo actual)")
+        case .newWorkspaceCmux: tr("nuevo espacio de trabajo de cmux (el ⌘N de cmux)")
+        case .voiceTalk: tr("mantener para dictar (requiere voice.mode=hold)")
+        case .countdown: tr("MODO DIVERSIÓN: reproduce el video y las luces lo siguen")
+        case .popover: tr("abrir el menú de la barra de menús")
+        case .tabForward: tr("pestaña siguiente (⌘⇧])")
+        case .tabBack: tr("pestaña anterior (⌘⇧[)")
+        case .arrowUp: tr("flecha arriba")
+        case .arrowDown: tr("flecha abajo")
+        case .arrowLeft: tr("flecha izquierda")
+        case .arrowRight: tr("flecha derecha")
+        case .prevSession: tr("sesión anterior")
+        case .nextSession: tr("sesión siguiente")
+        case .enter: tr("enviar ⏎ a la ventana activa")
+        case .shortcut: tr("atajo de teclado personalizado (se graba abajo)")
+        case .supersetNewAgent: tr("agente nuevo en el espacio de trabajo activo de Superset")
+        case .supersetHandoff: tr("traspasar la terminal activa a otro agente (confirmar con APPR)")
+        case .jumpOldestWaiting: tr("ir a la sesión que más lleva esperando")
+        case .interruptFocused: tr("interrumpir el agente activo (⎋ vía Superset)")
+        case .targetedArm: tr("preparar un envío remoto y luego pulsar una tecla de agente")
         default: short
         }
     }
@@ -283,6 +310,50 @@ public enum KeyAction: String, CaseIterable, Sendable, Codable {
         [.arrowUp, .arrowDown, .arrowLeft, .arrowRight,
          .tabBack, .tabForward, .prevSession, .nextSession,
          .approve, .reject, .snippet, .enter, .shortcut]
+    }
+
+    /// How the picker groups the actions under headers.
+    public enum Category: String, CaseIterable, Sendable {
+        case board, navigation, superset, typing, voice, cmux, fun
+    }
+
+    /// What stands between a press and its effect. Shown as a badge in the picker; the
+    /// behaviour itself belongs to each action's phase.
+    public enum Safeguard: Sendable {
+        case none
+        /// A second press inside the cooldown is dropped.
+        case debounce
+        /// Armed first, then confirmed with APPR or cancelled by any other key.
+        case twoStep
+        /// Reads the terminal before writing into it.
+        case snapshotFirst
+    }
+
+    public var category: Category {
+        switch self {
+        case .sync, .settings, .reset, .off, .popover: .board
+        case .tabForward, .tabBack, .arrowUp, .arrowDown, .arrowLeft, .arrowRight,
+             .prevSession, .nextSession, .jumpOldestWaiting: .navigation
+        case .supersetNewAgent, .supersetHandoff, .interruptFocused, .targetedArm: .superset
+        case .approve, .reject, .snippet, .enter, .shortcut, .newtab: .typing
+        case .voiceTap, .voiceTalk, .voiceToggle: .voice
+        case .newtabCmux, .newWorkspaceCmux: .cmux
+        case .countdown: .fun
+        }
+    }
+
+    /// Whether it does anything without the host-service. `jumpOldestWaiting` reads the
+    /// board's own registry, so it works with the client off.
+    public var requiresSuperset: Bool { category == .superset }
+
+    public var safeguard: Safeguard {
+        switch self {
+        // D2: debounce only — a new agent is cheap to close and slow to confirm.
+        case .supersetNewAgent: .debounce
+        case .supersetHandoff: .twoStep
+        case .interruptFocused, .targetedArm: .snapshotFirst
+        default: .none
+        }
     }
 
     /// Shipped bindings, from `lib/config.cjs`.

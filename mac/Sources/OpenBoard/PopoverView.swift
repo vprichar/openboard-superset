@@ -20,6 +20,7 @@ struct PopoverView: View {
     @EnvironmentObject private var updater: Updater
     @EnvironmentObject private var setup: SetupState
     @Environment(\.boardCommands) private var commands
+    @AppStorage(UIStrings.defaultsKey) private var uiLanguage = UIStrings.defaultLanguage.rawValue
 
     private let width: CGFloat = 376
 
@@ -75,6 +76,7 @@ struct PopoverView: View {
             updateRow
             commandRows
         }
+        .id(uiLanguage)
         .frame(width: width)
         // Cheap, and this is the only moment anyone is looking. A popover that opened
         // with a stale answer would keep offering setup after it was finished.
@@ -105,10 +107,10 @@ struct PopoverView: View {
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
-                    Text("Version \(version) is available")
+                    Text(tr("Versión %@ disponible", version))
                         .font(.system(size: 12.5, weight: .medium))
                     Spacer(minLength: 0)
-                    Text("Install")
+                    Text(tr("Instalar"))
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
                 }
@@ -161,8 +163,10 @@ struct PopoverView: View {
         // "sessions", not "live". Both surfaces say it, and "live" was doing the work
         // of a qualifier nobody asked for — a session that is not running is not on
         // the board at all.
-        var parts = ["\(live) session\(live == 1 ? "" : "s")"]
-        if blocked > 0 { parts.append("\(blocked) blocked") }
+        var parts = [live == 1 ? tr("%ld sesión", live) : tr("%ld sesiones", live)]
+        if blocked > 0 {
+            parts.append(blocked == 1 ? tr("%ld bloqueada", blocked) : tr("%ld bloqueadas", blocked))
+        }
         return parts.joined(separator: " · ")
     }
 
@@ -213,22 +217,29 @@ struct PopoverView: View {
         let blocked = board.blocked
         if blocked.count == 1 {
             let slot = blocked[0]
-            let tool = slot.pendingTool.map { " on \($0)" } ?? ""
-            return "Slot \(slot.slot) is waiting\(tool)"
+            let key = slot.displayKeyLabel.capitalizedFirst
+            if let tool = slot.pendingTool { return tr("%@ está esperando en %@", key, tool) }
+            return tr("%@ está esperando", key)
         }
-        let slots = blocked.map { String($0.slot) }.joined(separator: " and ")
-        return "Slots \(slots) are waiting — press one of those keys"
+        // Keys, not registry slots: in a workspace context key 2 can be slot 5, and
+        // "press one of those keys" has to name keys you can press.
+        let keys = blocked.map(\.displayKeyLabel).joined(separator: tr(" y "))
+        return tr("%@ esperan: pulsa una de esas teclas", keys.capitalizedFirst)
     }
 
     // MARK: sessions
 
     private var sessions: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SectionLabel("Agent keys")
+            SectionLabel(tr("Teclas de agente"))
             ForEach(board.slots) { slot in
                 SessionRow(
                     slot: slot,
-                    capID: board.caps[slot.key],
+                    // The cap of the pad key showing it; none for a session the pad
+                    // is not showing, rather than the cap of an unrelated key.
+                    capID: slot.isOccupied
+                        ? slot.padKey.flatMap(BoardLayout.key(forSlot:)).flatMap { board.caps[$0] }
+                        : board.caps[slot.key],
                     jump: { commands.jump(slot.slot) },
                     release: { commands.release(slot.slot) }
                 )
@@ -270,7 +281,7 @@ struct PopoverView: View {
      */
     private var actionKeys: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SectionLabel("Action keys")
+            SectionLabel(tr("Teclas de acción"))
             // One container for the whole block: side by side, independently sampled
             // glass leaves a hard seam between caps, and grouped they blend at the
             // edges the way a single sheet of material does.
@@ -328,7 +339,7 @@ struct PopoverView: View {
                  same baseline, and the scale factor lets a stubborn name shrink a
                  little rather than truncate into "new Terminal…".
                  */
-                Text(board.actions[cell.id]?.short ?? "unassigned")
+                Text(board.actions[cell.id]?.short ?? tr("sin asignar"))
                     .font(.system(size: 10.5))
                     .foregroundStyle(board.actions[cell.id] == nil ? .tertiary : .secondary)
                     .multilineTextAlignment(.center)
@@ -343,15 +354,15 @@ struct PopoverView: View {
 
     private var commandRows: some View {
         VStack(spacing: 1) {
-            MenuRow("Find running sessions") { commands.reconnect() }
+            MenuRow(tr("Buscar sesiones activas")) { commands.reconnect() }
             // Close first, then open. The panel's dismissal is a click on the status
             // item, and doing it *after* activating our own window would land the click
             // while focus is already moving — which is how this reads as ignored.
-            MenuRow("Settings") {
+            MenuRow(tr("Ajustes")) {
                 commands.dismissMenu()
                 commands.openSettings()
             }
-            MenuRow("Quit OpenBoard", shortcut: "⌘Q") { NSApplication.shared.terminate(nil) }
+            MenuRow(tr("Salir de OpenBoard"), shortcut: "⌘Q") { NSApplication.shared.terminate(nil) }
         }
         .padding(.horizontal, 8)
         .padding(.top, 7)
@@ -416,7 +427,7 @@ struct SessionRow: View {
                         .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
-                .help("Stop tracking this session and free its key. The session keeps running.")
+                .help(tr("Deja de seguir esta sesión y libera su tecla. La sesión sigue en marcha."))
             }
         }
         .onHover { hovering = $0 }
@@ -435,13 +446,16 @@ struct SessionRow: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("\(slot.slot)")
+            // The pad key, not the registry slot; "·" for a session on another
+            // workspace's board.
+            Text(slot.isOccupied ? slot.padKey.map(String.init) ?? "·" : "\(slot.slot)")
+                .help(slot.isOccupied ? slot.displayKeyLabel : "")
                 .font(.system(size: 11.5, weight: .semibold).monospacedDigit())
                 .foregroundStyle(.tertiary)
                 .frame(width: 9, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(slot.title ?? (slot.isOccupied ? "Untitled chat" : "Free"))
+                Text(slot.title ?? (slot.isOccupied ? tr("Chat sin título") : tr("Libre")))
                     .font(.system(size: 12.5, weight: .medium))
                     .foregroundStyle(slot.isOccupied ? .primary : .tertiary)
                     .lineLimit(1)
@@ -584,11 +598,10 @@ struct BatteryBadge: View {
             }
         }
         .help(isCharging
-            ? "Plugged in over USB. The battery level is published over Bluetooth, "
-                + "which the pad drops while it is on the cable."
+            ? tr("Conectado por USB. El nivel de batería se publica por Bluetooth, que el pad desactiva mientras está conectado al cable.")
             : percent == nil
-                ? "Battery not read yet — the pad may be asleep."
-                : "Codex Micro battery")
+                ? tr("Batería aún sin leer: puede que el pad esté en reposo.")
+                : tr("Batería del Codex Micro"))
     }
 }
 
@@ -653,7 +666,7 @@ struct DeviceDownBanner: View {
             // A permission is not fixed by asking again. Retrying puts the same
             // question to macOS and gets the same answer, so for that case the button
             // has to lead somewhere the answer can change.
-            Button(status.needsSetup ? "Set up" : "Retry") {
+            Button(status.needsSetup ? tr("Configurar") : tr("Reintentar")) {
                 if status.needsSetup { startSetup() } else { retry() }
             }
             .glassButton()
@@ -722,12 +735,13 @@ struct SetupNeededView: View {
             }
             .frame(width: 38, height: 38)
 
-            Text("\(progress.requiredDone) of \(progress.requiredTotal) set up")
+            Text(tr("%ld de %ld configurados", progress.requiredDone, progress.requiredTotal))
                 .font(.system(size: 13.5, weight: .semibold))
 
             if sessions > 0 {
-                Text("\(sessions) session\(sessions == 1 ? "" : "s") found — "
-                     + "the keys stay dark until this is finished.")
+                Text(sessions == 1
+                     ? tr("%ld sesión encontrada. Las teclas siguen apagadas hasta que termines.", sessions)
+                     : tr("%ld sesiones encontradas. Las teclas siguen apagadas hasta que termines.", sessions))
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -742,14 +756,14 @@ struct SetupNeededView: View {
                 .frame(maxWidth: 296)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Button("Continue setup") { startSetup() }
+            Button(tr("Continuar configuración")) { startSetup() }
                 .glassButton(prominent: true)
                 .padding(.top, 3)
 
             // The way out of the wall. Skipping is not finishing — the checklist
             // stays honest — but the sessions the app already found belong to the
             // user, not to the checklist.
-            Button("Show sessions anyway") { skipSetup() }
+            Button(tr("Mostrar sesiones de todos modos")) { skipSetup() }
                 .buttonStyle(.plain)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
@@ -762,18 +776,19 @@ struct SetupNeededView: View {
     private var remaining: String {
         let missing = SetupProgress.Step.allCases
             .filter { $0.isRequired && !progress.isDone($0) }
-        guard !missing.isEmpty else { return "Almost there." }
-        return "Still needed: " + missing.map(label).joined(separator: ", ") + "."
+        guard !missing.isEmpty else { return tr("Ya casi está.") }
+        let list = missing.map(label).joined(separator: ", ")
+        return missing.count == 1 ? tr("Falta: %@.", list) : tr("Faltan: %@.", list)
     }
 
     private func label(_ step: SetupProgress.Step) -> String {
         switch step {
-        case .inputMonitoring: "Input Monitoring"
-        case .accessibility: "Accessibility"
-        case .automation: "Automation"
-        case .calibration: "key order"
-        case .hooks: "Claude Code hooks"
-        case .openAtLogin: "Open at login"
+        case .inputMonitoring: tr("Monitorización de entrada")
+        case .accessibility: tr("Accesibilidad")
+        case .automation: tr("Automatización")
+        case .calibration: tr("orden de teclas")
+        case .hooks: tr("hooks de Claude Code")
+        case .openAtLogin: tr("abrir al iniciar sesión")
         }
     }
 }
@@ -792,7 +807,7 @@ struct CheckingView: View {
         VStack(spacing: 9) {
             ProgressView()
                 .controlSize(.small)
-            Text("Checking permissions…")
+            Text(tr("Comprobando permisos…"))
                 .font(.system(size: 11.5))
                 .foregroundStyle(.secondary)
         }
@@ -801,4 +816,9 @@ struct CheckingView: View {
         .padding(.top, 22)
         .padding(.bottom, 24)
     }
+}
+
+private extension String {
+    /// "key 2 · x" → "Key 2 · x", for the start of a sentence.
+    var capitalizedFirst: String { prefix(1).uppercased() + dropFirst() }
 }

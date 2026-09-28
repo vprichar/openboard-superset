@@ -39,27 +39,27 @@ public enum SessionState: String, CaseIterable, Sendable, Codable {
 
     public var label: String {
         switch self {
-        case .idle: "idle"
-        case .viewing: "viewing"
-        case .working: "working"
-        case .awaiting: "awaiting"
-        case .stalled: "stalled"
-        case .done: "done"
-        case .error: "error"
-        case .ended: "ended"
+        case .idle: tr("inactiva")
+        case .viewing: tr("a la vista")
+        case .working: tr("trabajando")
+        case .awaiting: tr("esperando")
+        case .stalled: tr("detenida")
+        case .done: tr("terminada")
+        case .error: tr("error")
+        case .ended: tr("cerrada")
         }
     }
 
     public var means: String {
         switch self {
-        case .idle: "Session open, nothing running."
-        case .viewing: "Idle, and the chat you are looking at."
-        case .working: "A turn — or a delegated subagent — is running."
-        case .awaiting: "Blocked on a permission prompt."
-        case .stalled: "An idle prompt fired."
-        case .done: "Finished, and you have not been back yet."
-        case .error: "The turn failed."
-        case .ended: "Session closed."
+        case .idle: tr("Sesión abierta, sin nada en marcha.")
+        case .viewing: tr("Inactiva, y es el chat que estás mirando.")
+        case .working: tr("Hay un turno (o un subagente delegado) en marcha.")
+        case .awaiting: tr("Bloqueada en una solicitud de permiso.")
+        case .stalled: tr("Saltó un aviso de inactividad.")
+        case .done: tr("Terminó y aún no has vuelto a ella.")
+        case .error: tr("El turno falló.")
+        case .ended: tr("Sesión cerrada.")
         }
     }
 
@@ -103,6 +103,20 @@ public enum LEDEffect: String, CaseIterable, Sendable, Codable {
     case rainbow
     case snake
     case gradient
+
+    /// What the settings window calls it. The raw value stays English: it is what
+    /// config files and the firmware vocabulary use.
+    public var displayName: String {
+        switch self {
+        case .off: tr("apagado")
+        case .solid: tr("fijo")
+        case .breath: tr("respiración")
+        case .shallowBreath: tr("respiración suave")
+        case .rainbow: tr("arcoíris")
+        case .snake: tr("serpiente")
+        case .gradient: tr("degradado")
+        }
+    }
 
     /// The firmware's numeric codes, established by probing the device.
     public var deviceCode: UInt8 {

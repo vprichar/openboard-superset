@@ -48,14 +48,14 @@ struct CalibrationSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(mapping ? "Which color is on which key?" : "Check the key order")
+                Text(mapping ? tr("¿Qué color hay en cada tecla?") : tr("Comprueba el orden de teclas"))
                     .font(.system(size: 16, weight: .semibold))
                 // The colors are drawn below rather than named here: naming six hues in
                 // prose and asking someone to hold them in their head while they look
                 // away at the pad is what made this feel like a chore.
                 Text(mapping
-                    ? "Pick the color you can see on each key — top row first, left to right."
-                    : "Your pad should look like this.")
+                    ? tr("Elige el color que ves en cada tecla: primero la fila de arriba, de izquierda a derecha.")
+                    : tr("Tu pad debería verse así."))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -96,7 +96,7 @@ struct CalibrationSheet: View {
             }
 
             if failed {
-                Text("Each color must be chosen exactly once.")
+                Text(tr("Cada color debe elegirse exactamente una vez."))
                     .font(.system(size: 11.5))
                     .foregroundStyle(Color(RGB(0xD41145)))
             } else {
@@ -104,17 +104,17 @@ struct CalibrationSheet: View {
             }
 
             HStack {
-                Button("Repaint") { commands.beginCalibration() }
-                    .help("Codex repaints these LEDs on its own schedule — use this if they drift.")
+                Button(tr("Repintar")) { commands.beginCalibration() }
+                    .help(tr("Codex repinta estos LEDs a su ritmo: usa esto si se desajustan."))
                 Spacer()
-                Button("Cancel") {
+                Button(tr("Cancelar")) {
                     commands.endCalibration()
                     dismiss()
                 }
                 .keyboardShortcut(.cancelAction)
 
                 if mapping {
-                    Button("Save") {
+                    Button(tr("Guardar")) {
                         guard let complete else { failed = true; return }
                         if commands.saveCalibration(complete) {
                             dismiss()
@@ -129,10 +129,10 @@ struct CalibrationSheet: View {
                     // is the order" and "No, they are different" both truncated in a
                     // 460pt sheet — and a truncated button is worse than a terse one,
                     // because it hides the half that distinguishes it from its neighbour.
-                    Button("Remap") { mapping = true }
+                    Button(tr("Reasignar")) { mapping = true }
                     // Recorded, not merely accepted: confirming is a statement about
                     // this pad, and it should stop being described as an assumption.
-                    Button("Confirm") {
+                    Button(tr("Confirmar")) {
                         _ = commands.saveCalibration(Array(1...BoardLayout.slotCount))
                         dismiss()
                     }
@@ -159,10 +159,10 @@ struct CalibrationSheet: View {
 
         return Menu {
             ForEach(CalibrationCapture.legend, id: \.slot) { entry in
-                Button(entry.name) { observed[position] = entry.slot; failed = false }
+                Button(Self.colorName(entry.name)) { observed[position] = entry.slot; failed = false }
             }
             Divider()
-            Button("Not lit") { observed[position] = nil; failed = false }
+            Button(tr("Apagada")) { observed[position] = nil; failed = false }
         } label: {
             VStack(spacing: 6) {
                 RoundedRectangle(cornerRadius: 7)
@@ -182,13 +182,28 @@ struct CalibrationSheet: View {
                     }
                 Text(chosen.flatMap { slot in
                     CalibrationCapture.legend.first { $0.slot == slot }?.name
-                } ?? "pick")
-                .font(.system(size: 10).monospaced())
+                }.map(Self.colorName) ?? tr("elegir"))
+                .font(.system(size: 10))
                 .foregroundStyle(.secondary)
             }
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .frame(maxWidth: .infinity)
+    }
+
+    /// Display name for a legend color. The legend names them in English because the
+    /// paint script and the capture JSON key on those strings; only what is shown is
+    /// translated.
+    private static func colorName(_ en: String) -> String {
+        switch en {
+        case "RED": tr("ROJO")
+        case "GREEN": tr("VERDE")
+        case "BLUE": tr("AZUL")
+        case "YELLOW": tr("AMARILLO")
+        case "CYAN": tr("CIAN")
+        case "MAGENTA": tr("MAGENTA")
+        default: en
+        }
     }
 }

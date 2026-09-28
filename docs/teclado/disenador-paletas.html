@@ -1,0 +1,1106 @@
+<title>Diseñador de paletas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --bg: #E4E7EA;
+  --surface: #F4F5F7;
+  --surface-2: #EAEDF0;
+  --ink: #15181C;
+  --muted: #58616D;
+  --line: #CAD0D7;
+  --accent: #2B50CC;
+  --accent-ink: #FFFFFF;
+  --ok: #1D7440;
+  --ok-bg: #DDF0E3;
+  --warn: #9A5200;
+  --warn-bg: #FBEBD6;
+  --bad: #B0123D;
+  --bad-bg: #F9DDE4;
+  --stage: #121315;
+  --stage-line: #26282C;
+  --stage-ink: #9AA0A8;
+  --focus: #2B50CC;
+  --f-display: "Chakra Petch", "Avenir Next Condensed", "Arial Narrow", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0E1012;
+    --surface: #171A1D;
+    --surface-2: #1D2125;
+    --ink: #E3E6EA;
+    --muted: #97A0AB;
+    --line: #2A3036;
+    --accent: #88A3FF;
+    --accent-ink: #0E1012;
+    --ok: #62CC8E;
+    --ok-bg: #14281C;
+    --warn: #F2A64E;
+    --warn-bg: #2D2112;
+    --bad: #FF7A98;
+    --bad-bg: #2E141B;
+    --stage: #0A0B0C;
+    --stage-line: #202225;
+    --stage-ink: #8B9199;
+    --focus: #88A3FF;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0E1012;
+  --surface: #171A1D;
+  --surface-2: #1D2125;
+  --ink: #E3E6EA;
+  --muted: #97A0AB;
+  --line: #2A3036;
+  --accent: #88A3FF;
+  --accent-ink: #0E1012;
+  --ok: #62CC8E;
+  --ok-bg: #14281C;
+  --warn: #F2A64E;
+  --warn-bg: #2D2112;
+  --bad: #FF7A98;
+  --bad-bg: #2E141B;
+  --stage: #0A0B0C;
+  --stage-line: #202225;
+  --stage-ink: #8B9199;
+  --focus: #88A3FF;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--f-body);
+  font-size: 14px;
+  line-height: 1.5;
+  padding-inline: 16px;
+  padding-block: 20px 48px;
+}
+.wrap { max-width: 1240px; margin-inline: auto; display: grid; gap: 20px; }
+h1, h2, h3 { font-family: var(--f-display); font-weight: 600; text-wrap: balance; margin: 0; letter-spacing: 0.01em; }
+h1 { font-size: 26px; line-height: 1.15; }
+h2 { font-size: 17px; }
+h3 { font-size: 14px; }
+p { margin: 0; }
+.muted { color: var(--muted); }
+.eyebrow { font-family: var(--f-display); font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); }
+.mono, code { font-family: var(--f-mono); font-size: 12.5px; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+header.top { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px 24px; }
+header.top .lede { max-width: 62ch; color: var(--muted); }
+
+.layout { display: grid; gap: 20px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+@media (min-width: 980px) {
+  .layout { grid-template-columns: minmax(0, 430px) minmax(0, 1fr); }
+  .aside { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); }
+}
+.aside, .main { display: grid; gap: 20px; min-width: 0; }
+
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: grid; gap: 14px; min-width: 0; }
+.panel-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 12px; }
+
+/* Stage */
+.stage { background: var(--stage); border-radius: 12px; padding: 14px; display: grid; gap: 10px; }
+.stage svg { width: 100%; height: auto; display: block; max-width: 100%; }
+.stage-foot { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center; color: var(--stage-ink); font-size: 12px; }
+.stage-foot .mono { color: var(--stage-ink); }
+
+/* Controls */
+button, select, input { font: inherit; color: inherit; }
+button {
+  cursor: pointer; border: 1px solid var(--line); background: var(--surface-2);
+  border-radius: 7px; padding: 6px 11px; font-weight: 500;
+}
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+select, input[type="text"], textarea {
+  background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; min-width: 0;
+}
+textarea { width: 100%; font-family: var(--f-mono); font-size: 12px; color: var(--ink); resize: vertical; }
+input[type="color"] { width: 34px; height: 30px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; cursor: pointer; flex: none; }
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+label { display: grid; gap: 3px; font-size: 12px; color: var(--muted); min-width: 0; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* Themes */
+.themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+.theme-btn { display: grid; gap: 6px; text-align: left; padding: 9px 10px; }
+.theme-btn[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.theme-btn .t-name { font-family: var(--f-display); font-weight: 600; }
+.theme-btn .t-sum { font-size: 11.5px; color: var(--muted); font-weight: 400; line-height: 1.35; }
+.strip { display: flex; height: 10px; border-radius: 3px; overflow: hidden; }
+.strip span { flex: 1; }
+
+/* State editor */
+.states { display: grid; gap: 8px; }
+.st {
+  display: grid; gap: 10px 14px; align-items: center;
+  grid-template-columns: minmax(0, 1fr);
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2);
+}
+@media (min-width: 720px) {
+  .st { grid-template-columns: minmax(150px, 1.1fr) auto minmax(120px, 0.9fr) minmax(100px, 1fr) minmax(100px, 1fr); }
+}
+.st-name { display: flex; gap: 10px; align-items: center; min-width: 0; }
+.st-name .dot { width: 14px; height: 14px; border-radius: 50%; flex: none; box-shadow: 0 0 0 1px rgba(0,0,0,.25); }
+.st-name strong { display: block; font-weight: 600; }
+.st-name small { display: block; color: var(--muted); font-size: 11.5px; line-height: 1.3; }
+.st-color { display: flex; gap: 6px; align-items: center; }
+.hex { width: 86px; font-family: var(--f-mono); font-size: 12.5px; text-transform: uppercase; }
+.hex[aria-invalid="true"] { border-color: var(--bad); }
+.rng { display: grid; grid-template-columns: minmax(0,1fr) 3.2em; align-items: center; gap: 6px; }
+.rng output { font-family: var(--f-mono); font-size: 12px; text-align: right; color: var(--ink); font-variant-numeric: tabular-nums; }
+.fx-note { font-size: 11px; color: var(--bad); }
+
+/* Palette */
+.pal { display: flex; flex-wrap: wrap; gap: 8px; }
+.pal-item { display: flex; gap: 6px; align-items: center; border: 1px solid var(--line); border-radius: 8px; padding: 5px 6px; background: var(--surface-2); }
+.pal-item .idx { font-family: var(--f-mono); font-size: 11px; color: var(--muted); width: 1.4em; text-align: center; }
+.pal-item button { padding: 2px 8px; }
+
+/* Assignment */
+.assign { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.check { display: flex; gap: 8px; align-items: center; color: var(--ink); font-size: 13px; }
+
+/* Validation */
+.score { font-family: var(--f-display); font-size: 13px; padding: 3px 9px; border-radius: 999px; }
+.score.ok { background: var(--ok-bg); color: var(--ok); }
+.score.warn { background: var(--warn-bg); color: var(--warn); }
+.rules { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.rules li { display: grid; grid-template-columns: 1.6em minmax(0,1fr); gap: 4px; padding: 7px 9px; border-radius: 7px; background: var(--surface-2); }
+.rules li.fail { background: var(--warn-bg); }
+.rules li.block { background: var(--bad-bg); }
+.rules .mark { font-weight: 600; }
+.rules li.pass .mark { color: var(--ok); }
+.rules li.fail .mark { color: var(--warn); }
+.rules li.block .mark { color: var(--bad); }
+.rules .r-title { font-weight: 500; }
+.rules .r-detail { font-size: 12px; color: var(--muted); grid-column: 2; }
+.rules li.fail .r-detail, .rules li.block .r-detail { color: var(--ink); }
+.group-title { margin-top: 4px; }
+
+.status { font-size: 12.5px; min-height: 1.4em; }
+.status.ok { color: var(--ok); }
+.status.err { color: var(--bad); }
+.io { display: grid; gap: 14px; grid-template-columns: minmax(0,1fr); }
+@media (min-width: 720px) { .io { grid-template-columns: minmax(0,1fr) minmax(0,1fr); } }
+.io > div { display: grid; gap: 8px; align-content: start; min-width: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div style="display:grid;gap:6px">
+      <span class="eyebrow">OpenBoard · macro pad de 16 teclas</span>
+      <h1>Diseñador de paletas</h1>
+    </div>
+    <p class="lede">Cambia el color, el brillo, el efecto y la velocidad de cada estado de sesión y míralo en el pad. Cada cambio se revisa contra las reglas de legibilidad que cumplen los temas de fábrica. Cuando termines, copia el JSON e impórtalo en OpenBoard.</p>
+  </header>
+
+  <div class="layout">
+    <div class="aside">
+      <section class="stage" aria-label="Vista previa del pad">
+        <svg id="pad" viewBox="0 0 476 476" role="img" aria-label="Pad de 4 por 4 con las seis teclas de agente y la barra de LED iluminadas con la paleta en edición"></svg>
+        <div class="stage-foot">
+          <span id="stage-caption">Simulación en pantalla, no el LED real.</span>
+          <span class="row">
+            <button type="button" id="btn-sweep">Probar barrido</button>
+            <button type="button" id="btn-confirm">Probar confirmación</button>
+            <button type="button" id="btn-fill">Probar tema</button>
+          </span>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-val">
+        <div class="panel-head">
+          <h2 id="h-val">Reglas de legibilidad</h2>
+          <span id="score" class="score ok">—</span>
+        </div>
+        <ul class="rules" id="rules"></ul>
+      </section>
+    </div>
+
+    <div class="main">
+      <section class="panel" aria-labelledby="h-themes">
+        <div class="panel-head">
+          <h2 id="h-themes">Temas de fábrica</h2>
+          <span class="muted" id="theme-now">Tema: Clásico</span>
+        </div>
+        <div class="themes" id="themes"></div>
+        <label for="theme-name">Nombre del tema (1–40 caracteres)
+          <input type="text" id="theme-name" maxlength="60" value="Clásico">
+        </label>
+      </section>
+
+      <section class="panel" aria-labelledby="h-states">
+        <div class="panel-head">
+          <h2 id="h-states">Estados</h2>
+          <span class="muted">Color de hardware: lo que emite el LED</span>
+        </div>
+        <div class="states" id="states"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-pal">
+        <div class="panel-head">
+          <h2 id="h-pal">Workspaces y confirmación</h2>
+          <span class="muted" id="pal-count"></span>
+        </div>
+        <p class="muted">Un color por workspace. Solo aparece de paso, en el barrido al cambiar de workspace y en el guiño de la tecla prestada. El orden decide qué color le toca a cada workspace.</p>
+        <div class="pal" id="palette"></div>
+        <div class="row">
+          <button type="button" id="pal-add">Añadir color</button>
+        </div>
+        <div class="row" style="gap:10px">
+          <label for="confirm-color" style="display:flex;gap:8px;align-items:center;color:var(--ink);font-size:13px">
+            Luz de confirmación
+          </label>
+          <div class="st-color">
+            <input type="color" id="confirm-color" aria-label="Color de confirmación">
+            <input type="text" class="hex" id="confirm-hex" aria-label="Color de confirmación en hexadecimal" spellcheck="false">
+          </div>
+          <span class="muted" style="font-size:12px">Se usa solo el color. El efecto y el brillo siguen siendo los tuyos.</span>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-assign">
+        <div class="panel-head">
+          <h2 id="h-assign">Qué muestra cada tecla</h2>
+        </div>
+        <label class="check" for="rotate"><input type="checkbox" id="rotate"> Recorrer todos los estados en rotación</label>
+        <div class="assign" id="assign"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="h-io">
+        <div class="panel-head">
+          <h2 id="h-io">Exportar e importar</h2>
+          <span class="muted mono">openboardTheme 1</span>
+        </div>
+        <div class="io">
+          <div>
+            <h3>JSON del tema</h3>
+            <textarea id="export" rows="14" readonly aria-label="JSON del tema para exportar"></textarea>
+            <div class="row"><button type="button" class="primary" id="btn-copy">Copiar JSON</button></div>
+            <p class="status" id="copy-status" role="status"></p>
+          </div>
+          <div>
+            <h3>Pegar un tema</h3>
+            <textarea id="import" rows="14" placeholder='{"openboardTheme": 1, "name": …}' aria-label="JSON del tema para importar"></textarea>
+            <div class="row"><button type="button" id="btn-import">Importar</button></div>
+            <p class="status" id="import-status" role="status"></p>
+          </div>
+        </div>
+        <label class="check" for="persist"><input type="checkbox" id="persist" checked> Recordar la paleta en edición en este navegador</label>
+      </section>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ---------- Vocabulary (OpenBoardKit/SessionState.swift) ----------
+  const STATES = ["idle", "viewing", "working", "awaiting", "stalled", "done", "error", "unconfirmed"];
+  const LABEL = {
+    idle: "En reposo", viewing: "Mirando", working: "Trabajando", awaiting: "Te espera",
+    stalled: "Atascada", done: "Terminó", error: "Error", unconfirmed: "Sin confirmar"
+  };
+  const GLOSS = {
+    idle: "Sesión abierta, sin actividad.",
+    viewing: "La sesión que tienes delante.",
+    working: "El agente está trabajando.",
+    awaiting: "Necesita tu respuesta.",
+    stalled: "Sigue esperando y se quedó callada.",
+    done: "Terminó su turno.",
+    error: "Algo falló.",
+    unconfirmed: "Restaurada al arrancar, aún sin ver en vivo."
+  };
+  const EFFECTS = ["off", "solid", "snake", "rainbow", "breath", "gradient", "shallow-breath"];
+  const EFFECT_LABEL = {
+    off: "apagado", solid: "fijo", snake: "serpiente", rainbow: "arcoíris",
+    breath: "respirar", gradient: "degradado", "shallow-breath": "respirar suave"
+  };
+  // formato.md: snake and gradient look off on a single key, so a theme cannot carry them.
+  const EXPORTABLE_EFFECTS = ["solid", "breath", "shallow-breath", "rainbow", "off"];
+  const PALETTE_MAX = 12;
+  const NAME_MAX = 40;
+
+  // ---------- Factory themes (ColorThemes.swift + SessionState.defaultAppearances) ----------
+  const ap = (color, effect, brightness, speed) => ({ color, effect, brightness, speed });
+  const CLASSIC_STATES = {
+    idle: ap("#2E4A6B", "shallow-breath", 0.55, 0.25),
+    viewing: ap("#2E4A6B", "shallow-breath", 0.85, 0.25),
+    working: ap("#0C47E9", "shallow-breath", 0.75, 0.45),
+    awaiting: ap("#FF6A00", "shallow-breath", 0.95, 0.75),
+    stalled: ap("#FF6A00", "shallow-breath", 0.5, 0.3),
+    done: ap("#09B821", "shallow-breath", 0.7, 0.25),
+    error: ap("#D41145", "breath", 0.9, 0.8),
+    unconfirmed: ap("#2E4A6B", "solid", 0.3, 0)
+  };
+  function themed(id, name, summary, c) {
+    const colors = {
+      idle: c.idle, viewing: c.idle, working: c.working, awaiting: c.awaiting,
+      stalled: c.awaiting, done: c.done, error: c.error, unconfirmed: c.idle
+    };
+    const states = {};
+    STATES.forEach(s => { states[s] = Object.assign({}, CLASSIC_STATES[s], { color: colors[s] }); });
+    return { id, name, summary, states, palette: c.palette, confirm: c.confirm };
+  }
+  const THEMES = [
+    { id: "classic", name: "Clásico", summary: "Los colores de fábrica del pad.",
+      states: CLASSIC_STATES, palette: ["#9B30FF", "#00C9A7", "#B4E600", "#D6E4FF"], confirm: "#FFFFFF" },
+    themed("gamer", "Gamer", "Neón sobre negro: saturado y con mucho contraste.", {
+      idle: "#141E5A", working: "#00A3FF", awaiting: "#FF5F00", done: "#39FF14", error: "#FF0040",
+      palette: ["#FF00E6", "#8A2BFF", "#D4FF00", "#00FFC8"], confirm: "#FFFFFF" }),
+    themed("ai", "IA", "Azules y violetas fríos; los avisos siguen siendo cálidos.", {
+      idle: "#2A2F66", working: "#3D7BFF", awaiting: "#FF8A1F", done: "#26D98A", error: "#FF2E63",
+      palette: ["#A06BFF", "#5FE3FF", "#E85CF2", "#E6ECFF"], confirm: "#FFFFFF" }),
+    themed("pop", "Pop", "Colores vivos de caramelo.", {
+      idle: "#3F4A66", working: "#3B82F6", awaiting: "#FF7A00", done: "#2BD96B", error: "#FF1F4B",
+      palette: ["#FF4FD8", "#A8F000", "#00D5E0", "#9B4DFF"], confirm: "#FFFFFF" }),
+    themed("claude", "Claude", "El terracota, el marfil y los neutros de Anthropic.", {
+      idle: "#4A4945", working: "#6A9BCC", awaiting: "#D97757", done: "#6FA35B", error: "#B83A5E",
+      palette: ["#F0E6D2", "#D2B48C", "#64708C", "#8CAF91"], confirm: "#FAF9F5" })
+  ];
+
+  // ---------- State ----------
+  const clone = o => JSON.parse(JSON.stringify(o));
+  function fromTheme(t) {
+    return { name: t.name, states: clone(t.states), palette: t.palette.slice(), confirm: t.confirm };
+  }
+  let doc = fromTheme(THEMES[0]);
+  let slotAssign = ["idle", "viewing", "working", "awaiting", "done", "error"];
+  let barAssign = "working";
+  let rotate = false;
+  let override = null; // {kind:"sweep"|"confirm"|"fill", start, until, next?, onEnd?}
+
+  const STORE_KEY = "openboard-disenador-paletas-v1";
+  function save() {
+    if (!document.getElementById("persist").checked) return;
+    try { localStorage.setItem(STORE_KEY, JSON.stringify({ doc, slotAssign, barAssign, rotate })); } catch (e) {}
+  }
+  function forget() { try { localStorage.removeItem(STORE_KEY); } catch (e) {} }
+  (function load() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return;
+      const v = JSON.parse(raw);
+      if (v && v.doc && v.doc.states && Array.isArray(v.doc.palette)) {
+        const ok = STATES.every(s => v.doc.states[s] && isHex(v.doc.states[s].color));
+        if (ok) doc = v.doc;
+      }
+      if (Array.isArray(v.slotAssign) && v.slotAssign.length === 6) slotAssign = v.slotAssign.map(s => STATES.includes(s) ? s : "idle");
+      if (STATES.includes(v.barAssign)) barAssign = v.barAssign;
+      rotate = !!v.rotate;
+    } catch (e) {}
+  })();
+
+  // ---------- Color math (WorkspaceColors.hue + SupersetSettingsTests helpers) ----------
+  function isHex(s) { return typeof s === "string" && /^#?[0-9a-fA-F]{6}$/.test(s.trim()); }
+  function normHex(s) { s = s.trim().replace("#", "").toUpperCase(); return "#" + s; }
+  function rgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  function hueOf(hex) {
+    const [R, G, B] = rgb(hex).map(v => v / 255);
+    const high = Math.max(R, G, B), low = Math.min(R, G, B), chroma = high - low;
+    if (!(high > 0.05) || chroma / high < 0.35) return null;
+    let h;
+    if (high === R) h = ((G - B) / chroma) % 6;
+    else if (high === G) h = (B - R) / chroma + 2;
+    else h = (R - G) / chroma + 4;
+    h *= 60;
+    return h < 0 ? h + 360 : h;
+  }
+  const hueGap = (a, b) => { const g = Math.abs(a - b); return Math.min(g, 360 - g); };
+  const inAttention = h => h >= 5 && h <= 45;
+  const isRed = h => h >= 330 || h <= 10;
+  const isAttention = h => inAttention(h) || isRed(h);
+  function dist(a, b) {
+    const x = rgb(a), y = rgb(b);
+    return Math.sqrt((x[0]-y[0])**2 + (x[1]-y[1])**2 + (x[2]-y[2])**2);
+  }
+  function emitted(a) {
+    const lin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    const [r, g, b] = rgb(a.color).map(v => lin(v / 255));
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) * a.brightness;
+  }
+  const deg = h => h === null ? "sin tono" : Math.round(h) + "°";
+  const num = (v, d) => v.toLocaleString("es", { minimumFractionDigits: d, maximumFractionDigits: d });
+
+  // ---------- Rules (formato.md «Reglas de legibilidad» = ThemeRules.violations) ----------
+  function evaluate() {
+    const S = doc.states, H = {};
+    STATES.forEach(s => { H[s] = hueOf(S[s].color); });
+    const out = { blocking: [], meaning: [], palette: [], contrast: [] };
+    const push = (group, pass, title, detail) => out[group].push({ pass, title, detail });
+
+    // Exportability (formato.md: hard errors on import)
+    const name = doc.name.trim();
+    push("blocking", name.length >= 1 && name.length <= NAME_MAX, "El nombre tiene de 1 a 40 caracteres",
+      name.length === 0 ? "Escribe un nombre: OpenBoard no importa un tema sin nombre." :
+      name.length > NAME_MAX ? `Tiene ${name.length} caracteres. Acórtalo a 40 o menos.` : `«${name}», ${name.length} caracteres.`);
+    const badFx = STATES.filter(s => !EXPORTABLE_EFFECTS.includes(S[s].effect));
+    push("blocking", badFx.length === 0, "Todos los efectos se pueden exportar",
+      badFx.length === 0 ? "Fijo, respirar, respirar suave, arcoíris o apagado en todos los estados." :
+      badFx.map(s => `${LABEL[s]} usa «${EFFECT_LABEL[S[s].effect]}»`).join("; ") +
+      ". En una tecla sola se ve apagado y OpenBoard rechaza el tema. Elige otro efecto.");
+
+    // 1. Meaning
+    const warm = s => {
+      const h = H[s];
+      if (h === null) return `${LABEL[s]} es demasiado gris u oscuro para tener tono.`;
+      return inAttention(h) ? `${LABEL[s]} ${deg(h)}.` : `${LABEL[s]} está a ${deg(h)}, fuera de 5–45°: no se lee como aviso.`;
+    };
+    push("meaning", H.awaiting !== null && inAttention(H.awaiting) && H.stalled !== null && inAttention(H.stalled),
+      "Te espera y atascada en tono cálido de atención (5–45°)", warm("awaiting") + " " + warm("stalled"));
+    push("meaning", H.error !== null && isRed(H.error), "Error en rojo (330–10°)",
+      H.error === null ? "Error es demasiado gris u oscuro para tener tono." :
+      isRed(H.error) ? `Error ${deg(H.error)}.` : `Error está a ${deg(H.error)}: no se lee como rojo.`);
+    if (H.error !== null && H.awaiting !== null) {
+      const g = hueGap(H.error, H.awaiting);
+      push("meaning", g >= 20, "Error a 20° o más de te espera",
+        g >= 20 ? `Separados ${Math.round(g)}°.` : `Solo ${Math.round(g)}° de separación: un aviso y un fallo se confundirían.`);
+    } else {
+      push("meaning", false, "Error a 20° o más de te espera", "No se puede medir: uno de los dos no tiene tono.");
+    }
+    push("meaning", H.done !== null && H.done >= 75 && H.done <= 165, "Terminó en verde (75–165°)",
+      H.done === null ? "Terminó es demasiado gris u oscuro para tener tono." :
+      (H.done >= 75 && H.done <= 165) ? `Terminó ${deg(H.done)}.` : `Terminó está a ${deg(H.done)}: no se lee como verde.`);
+    push("meaning", H.working !== null && H.working >= 180 && H.working <= 275, "Trabajando en azul o frío (180–275°)",
+      H.working === null ? "Trabajando es demasiado gris u oscuro para tener tono." :
+      (H.working >= 180 && H.working <= 275) ? `Trabajando ${deg(H.working)}.` : `Trabajando está a ${deg(H.working)}: no se lee como frío.`);
+    const quiet = [["idle", H.idle], ["viewing", H.viewing], ["unconfirmed", H.unconfirmed], ["confirm", hueOf(doc.confirm)]];
+    const loud = quiet.filter(([, h]) => h !== null && isAttention(h));
+    const qn = k => k === "confirm" ? "Confirmación" : LABEL[k];
+    push("meaning", loud.length === 0, "Reposo, mirando, sin confirmar y confirmación sin tonos de atención",
+      loud.length === 0 ? quiet.map(([k, h]) => `${qn(k)} ${deg(h)}`).join(", ") + "." :
+      loud.map(([k, h]) => `${qn(k)} está a ${deg(h)}`).join("; ") + ": se leería como aviso o como error.");
+
+    // 2. Palette
+    const stateKeys = STATES;
+    doc.palette.forEach((c, i) => {
+      const hc = hueOf(c), issues = [];
+      stateKeys.forEach(s => {
+        const hs = H[s];
+        if (hc !== null && hs !== null && hueGap(hc, hs) < 20) issues.push(`${Math.round(hueGap(hc, hs))}° de ${LABEL[s].toLowerCase()}`);
+        const d = dist(c, S[s].color);
+        if (d < 40) issues.push(`distancia RGB ${Math.round(d)} con ${LABEL[s].toLowerCase()}`);
+      });
+      const uniq = Array.from(new Set(issues));
+      push("palette", uniq.length === 0, `Workspace ${i + 1} (${c}) no imita ningún estado`,
+        uniq.length === 0 ? `Tono ${deg(hc)}; a 20° o más de cada estado y a 40 o más de distancia RGB.` :
+        `Está a ${uniq.join(", ")}. Necesita 20° de tono y 40 de distancia RGB; el pad lo saltaría o se confundiría con el estado.`);
+    });
+    const close = [];
+    for (let i = 0; i < doc.palette.length; i++)
+      for (let j = i + 1; j < doc.palette.length; j++) {
+        const d = dist(doc.palette[i], doc.palette[j]);
+        if (d < 60) close.push(`${i + 1} y ${j + 1} (${Math.round(d)})`);
+      }
+    push("palette", close.length === 0, "Los colores de workspace se distinguen entre sí (60 o más de distancia RGB)",
+      close.length === 0 ? (doc.palette.length > 1 ? "Todos los pares están separados." : "Solo hay un color.") :
+      `Demasiado parecidos: ${close.join(", ")}.`);
+
+    // 3. Contrast
+    const ei = emitted(S.idle), ew = emitted(S.working), ev = emitted(S.viewing);
+    const ratio = ei > 0 ? ew / ei : Infinity;
+    push("contrast", ew >= ei * 1.5, "Trabajando emite 1,5 veces o más que en reposo",
+      ei === 0 ? "En reposo no emite luz." :
+      `Trabajando emite ${num(ratio, 2)} veces lo de en reposo` + (ew >= ei * 1.5 ? "." : ": un pad en reposo parecería trabajando. Sube el brillo de trabajando o baja el de reposo."));
+    push("contrast", ev > ei, "Mirando emite más que en reposo",
+      ev > ei ? `Mirando ${num(ev * 100, 1)} frente a ${num(ei * 100, 1)} (luminancia × brillo, %).` :
+      `Mirando ${num(ev * 100, 1)} frente a ${num(ei * 100, 1)}: la sesión que tienes delante no destacaría.`);
+    return out;
+  }
+
+  // ---------- Pad drawing ----------
+  const NS = "http://www.w3.org/2000/svg";
+  function el(tag, attrs, parent) {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  const svg = document.getElementById("pad");
+  const PAD = 26, STEP = 110, KEY = 94;
+  const cell = (r, c) => [PAD + c * STEP, PAD + r * STEP];
+
+  const defs = el("defs", {}, svg);
+  const glow = el("filter", { id: "glow", x: "-60%", y: "-60%", width: "220%", height: "220%" }, defs);
+  el("feGaussianBlur", { stdDeviation: "9" }, glow);
+  const glowS = el("filter", { id: "glowS", x: "-100%", y: "-100%", width: "300%", height: "300%" }, defs);
+  el("feGaussianBlur", { stdDeviation: "4" }, glowS);
+  const caseG = el("linearGradient", { id: "case", x1: "0", y1: "0", x2: "0", y2: "1" }, defs);
+  el("stop", { offset: "0", "stop-color": "#2A2C30" }, caseG);
+  el("stop", { offset: "1", "stop-color": "#1A1B1E" }, caseG);
+  const frost = el("linearGradient", { id: "frost", x1: "0", y1: "0", x2: "0", y2: "1" }, defs);
+  el("stop", { offset: "0", "stop-color": "#FFFFFF", "stop-opacity": "0.22" }, frost);
+  el("stop", { offset: "0.45", "stop-color": "#FFFFFF", "stop-opacity": "0.07" }, frost);
+  el("stop", { offset: "1", "stop-color": "#FFFFFF", "stop-opacity": "0.02" }, frost);
+  const capG = el("linearGradient", { id: "cap", x1: "0", y1: "0", x2: "0", y2: "1" }, defs);
+  el("stop", { offset: "0", "stop-color": "#35373C" }, capG);
+  el("stop", { offset: "1", "stop-color": "#25272B" }, capG);
+  const silver = el("radialGradient", { id: "silver", cx: "0.35", cy: "0.3", r: "0.8" }, defs);
+  el("stop", { offset: "0", "stop-color": "#F2F3F5" }, silver);
+  el("stop", { offset: "0.55", "stop-color": "#B9BDC3" }, silver);
+  el("stop", { offset: "1", "stop-color": "#7D8187" }, silver);
+  const stick = el("radialGradient", { id: "stick", cx: "0.4", cy: "0.35", r: "0.75" }, defs);
+  el("stop", { offset: "0", "stop-color": "#3A3C40" }, stick);
+  el("stop", { offset: "1", "stop-color": "#0B0B0C" }, stick);
+
+  el("rect", { x: 4, y: 4, width: 468, height: 468, rx: 30, fill: "url(#case)", stroke: "#34363B", "stroke-width": 1.5 }, svg);
+
+  function plainKey(r, c) {
+    const [x, y] = cell(r, c);
+    const g = el("g", { transform: `translate(${x},${y})` }, svg);
+    el("rect", { x: 0, y: 2, width: KEY, height: KEY, rx: 16, fill: "#0C0D0E" }, g);
+    el("rect", { x: 0, y: 0, width: KEY, height: KEY, rx: 16, fill: "url(#cap)", stroke: "#3E4146", "stroke-width": 1 }, g);
+    return g;
+  }
+  function caption(g, text) {
+    const t = el("text", { x: KEY / 2, y: 80, "text-anchor": "middle", fill: "#8E949C",
+      "font-family": "Chakra Petch, Arial Narrow, sans-serif", "font-size": 10.5, "letter-spacing": "1.2" }, g);
+    t.textContent = text;
+  }
+  function glyph(g, text, size) {
+    const t = el("text", { x: KEY / 2, y: 52, "text-anchor": "middle", "dominant-baseline": "middle",
+      fill: "#D9DCE0", "font-size": size || 28, "font-family": "system-ui, sans-serif" }, g);
+    t.textContent = text;
+  }
+
+  // Row 1: dial
+  (function () {
+    const [x, y] = cell(0, 0);
+    const g = el("g", { transform: `translate(${x + KEY / 2},${y + KEY / 2})` }, svg);
+    el("circle", { r: 46, fill: "#0C0D0E" }, g);
+    el("circle", { r: 43, fill: "url(#silver)", stroke: "#DADDE1", "stroke-width": 1 }, g);
+    for (let i = 0; i < 48; i++) {
+      const a = i * Math.PI * 2 / 48;
+      el("line", { x1: Math.cos(a) * 39, y1: Math.sin(a) * 39, x2: Math.cos(a) * 43, y2: Math.sin(a) * 43,
+        stroke: "#8D9197", "stroke-width": 0.8 }, g);
+    }
+    const a = -3 * Math.PI / 4;
+    el("line", { x1: Math.cos(a) * 16, y1: Math.sin(a) * 16, x2: Math.cos(a) * 34, y2: Math.sin(a) * 34,
+      stroke: "#2B2D31", "stroke-width": 3.5, "stroke-linecap": "round" }, g);
+  })();
+  // Row 1: joystick
+  (function () {
+    const [x, y] = cell(0, 3);
+    const g = el("g", { transform: `translate(${x + KEY / 2},${y + KEY / 2})` }, svg);
+    el("circle", { r: 45, fill: "#151618", stroke: "#34363B", "stroke-width": 1 }, g);
+    el("circle", { r: 34, fill: "url(#stick)", stroke: "#000", "stroke-width": 1 }, g);
+    el("circle", { cx: 14, cy: -14, r: 3.2, fill: "#C9CCD1" }, g);
+  })();
+
+  // Agent keys (6)
+  const SLOT_POS = [[0, 1], [0, 2], [1, 0], [1, 1], [1, 2], [1, 3]];
+  const slots = SLOT_POS.map(([r, c], i) => {
+    const [x, y] = cell(r, c);
+    const g = el("g", { transform: `translate(${x},${y})` }, svg);
+    const halo = el("rect", { x: -4, y: -4, width: KEY + 8, height: KEY + 8, rx: 20, fill: "#000", opacity: 0, filter: "url(#glow)" }, g);
+    el("rect", { x: 0, y: 2, width: KEY, height: KEY, rx: 16, fill: "#0C0D0E" }, g);
+    el("rect", { x: 0, y: 0, width: KEY, height: KEY, rx: 16, fill: "#2C2F34" }, g);
+    const grad = el("linearGradient", { id: "gk" + i, x1: "0", y1: "0", x2: "1", y2: "1" }, defs);
+    const stops = [0, 0.25, 0.5, 0.75, 1].map(o => el("stop", { offset: o, "stop-color": "#000", "stop-opacity": 0 }, grad));
+    el("rect", { x: 3, y: 3, width: KEY - 6, height: KEY - 6, rx: 13, fill: `url(#gk${i})` }, g);
+    el("rect", { x: 0, y: 0, width: KEY, height: KEY, rx: 16, fill: "url(#frost)", stroke: "rgba(255,255,255,0.16)", "stroke-width": 1 }, g);
+    const num = el("text", { x: KEY - 10, y: 18, "text-anchor": "end", fill: "rgba(255,255,255,0.55)",
+      "font-family": "IBM Plex Mono, monospace", "font-size": 10 }, g);
+    num.textContent = String(i + 1);
+    const lab = el("text", { x: 10, y: KEY - 11, fill: "rgba(255,255,255,0.78)",
+      "font-family": "Chakra Petch, Arial Narrow, sans-serif", "font-size": 10.5, "letter-spacing": "0.4" }, g);
+    return { halo, stops, lab };
+  });
+
+  // Row 3
+  (function () {
+    let g = plainKey(2, 0); glyph(g, "⚡"); caption(g, "FAST");
+    g = plainKey(2, 1); glyph(g, "✓"); caption(g, "APPR");
+    g = plainKey(2, 2); glyph(g, "✗"); caption(g, "REJ");
+    g = plainKey(2, 3);
+    const s = { stroke: "#D9DCE0", "stroke-width": 2.6, fill: "none", "stroke-linecap": "round", "stroke-linejoin": "round" };
+    el("path", Object.assign({ d: "M47 66 V50 L33 34 M47 50 L61 34" }, s), g);
+    el("path", Object.assign({ d: "M33 42 V34 H41 M61 42 V34 H53" }, s), g);
+    caption(g, "BRANCH");
+  })();
+
+  // Row 4: LED bar + circle
+  const bar = (function () {
+    const [x, y] = cell(3, 0);
+    const g = el("g", { transform: `translate(${x},${y})` }, svg);
+    el("rect", { x: 0, y: 0, width: KEY, height: KEY, rx: 16, fill: "#18191C", stroke: "#2F3136", "stroke-width": 1 }, g);
+    el("rect", { x: 18, y: 8, width: 24, height: 78, rx: 6, fill: "#0B0C0D" }, g);
+    const segs = [];
+    for (let j = 0; j < 5; j++) {
+      const sy = 12 + j * 14.6;
+      const halo = el("rect", { x: 20, y: sy, width: 20, height: 11, rx: 3, fill: "#000", opacity: 0, filter: "url(#glowS)" }, g);
+      el("rect", { x: 21, y: sy, width: 18, height: 11, rx: 3, fill: "#222428" }, g);
+      const led = el("rect", { x: 21, y: sy, width: 18, height: 11, rx: 3, fill: "#000", opacity: 0 }, g);
+      segs.push({ halo, led });
+    }
+    el("circle", { cx: 68, cy: 47, r: 15, fill: "url(#cap)", stroke: "#3E4146", "stroke-width": 1 }, g);
+    return segs;
+  })();
+  (function () {
+    let g = plainKey(3, 1);
+    const s = { stroke: "#D9DCE0", "stroke-width": 2.4, fill: "none", "stroke-linecap": "round" };
+    el("rect", { x: 40, y: 26, width: 14, height: 26, rx: 7, fill: "none", stroke: "#D9DCE0", "stroke-width": 2.4 }, g);
+    el("path", Object.assign({ d: "M33 46 a14 14 0 0 0 28 0 M47 60 V66" }, s), g);
+    caption(g, "MIC");
+    g = plainKey(3, 2); glyph(g, "✎"); caption(g, "NEW");
+    g = plainKey(3, 3);
+    const t = el("text", { x: KEY / 2, y: 52, "text-anchor": "middle", "dominant-baseline": "middle", fill: "#D9DCE0",
+      "font-family": "Chakra Petch, Arial Narrow, sans-serif", "font-size": 17, "font-weight": 600, "letter-spacing": "1.5" }, g);
+    t.textContent = "CODEX";
+  })();
+
+  // ---------- LED simulation ----------
+  function hsl2hex(h, s, l) {
+    s /= 100; l /= 100;
+    const k = n => (n + h / 30) % 12, a = s * Math.min(l, 1 - l);
+    const f = n => Math.round(255 * (l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)))));
+    return "#" + [f(0), f(8), f(4)].map(v => v.toString(16).padStart(2, "0")).join("");
+  }
+  // Returns {i: 0..1 intensity factor, color} for a position 0..1 along a spatial run.
+  function effectAt(look, t, pos) {
+    const period = 6 - 5 * look.speed;
+    const ph = ((t / period) % 1 + 1) % 1;
+    const wave = 0.5 - 0.5 * Math.cos(2 * Math.PI * ph);
+    switch (look.effect) {
+      case "off": return { i: 0, color: look.color };
+      case "solid": return { i: 1, color: look.color };
+      case "breath": return { i: 0.06 + 0.94 * wave, color: look.color };
+      case "shallow-breath": return { i: 0.55 + 0.45 * wave, color: look.color };
+      case "rainbow": return { i: 1, color: hsl2hex((ph * 360 + pos * 90) % 360, 100, 50) };
+      case "snake": {
+        let d = Math.abs(pos - ph); d = Math.min(d, 1 - d);
+        return { i: Math.max(0.06, 1 - d * 4), color: look.color };
+      }
+      case "gradient": return { i: 0.2 + 0.8 * (0.5 + 0.5 * Math.cos(2 * Math.PI * (pos - ph))), color: look.color };
+    }
+    return { i: 1, color: look.color };
+  }
+  function paintSlot(slot, look, t, label) {
+    slot.lab.textContent = label;
+    // Snake and gradient are spatial: on a single key the firmware shows them off.
+    const spatial = look.effect === "snake" || look.effect === "gradient";
+    let peak = 0;
+    slot.stops.forEach((stop, k) => {
+      const e = spatial ? { i: 0, color: look.color } : effectAt(look, t, k / 4);
+      const v = look.brightness * e.i;
+      stop.setAttribute("stop-color", e.color);
+      stop.setAttribute("stop-opacity", Math.min(1, v * 1.05).toFixed(3));
+      peak = Math.max(peak, v);
+    });
+    const mid = spatial ? { color: look.color } : effectAt(look, t, 0.5);
+    slot.halo.setAttribute("fill", mid.color);
+    slot.halo.setAttribute("opacity", (peak * 0.85).toFixed(3));
+  }
+  function paintBar(look, t) {
+    bar.forEach((seg, j) => {
+      const e = effectAt(look, t, (4 - j) / 5);
+      const v = look.brightness * e.i;
+      seg.led.setAttribute("fill", e.color);
+      seg.led.setAttribute("opacity", v.toFixed(3));
+      seg.halo.setAttribute("fill", e.color);
+      seg.halo.setAttribute("opacity", (v * 0.9).toFixed(3));
+    });
+  }
+
+  const reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const t0 = performance.now();
+  function frame(now) {
+    const t = reduce ? 1.4 : (now - t0) / 1000;
+    const caption = document.getElementById("stage-caption");
+    if (override && now > override.until) {
+      const ended = override;
+      override = null;
+      caption.textContent = captionText();
+      if (ended.onEnd) ended.onEnd();
+    }
+    let barDone = false;
+    if (override && override.kind === "fill") {
+      // Cascade: each key lights with a different state of the new theme, 70 ms apart;
+      // the bar then fills with the new palette, sweeping.
+      const since = now - override.start, next = override.next;
+      slots.forEach((s, i) => {
+        const lit = since >= i * FILL_GAP;
+        const st = lit ? FILL_ORDER[i] : (rotate ? STATES[i % STATES.length] : slotAssign[i]);
+        paintSlot(s, (lit ? next : doc).states[st], t, LABEL[st]);
+      });
+      const step = Math.floor(since / 200), n = next.palette.length;
+      bar.forEach((seg, j) => {
+        const lit = since >= (FILL_ORDER.length + (4 - j)) * FILL_GAP;
+        const c = next.palette[(j + step) % n];
+        seg.led.setAttribute("fill", c);
+        seg.led.setAttribute("opacity", lit ? "0.9" : "0");
+        seg.halo.setAttribute("fill", c);
+        seg.halo.setAttribute("opacity", lit ? "0.8" : "0");
+      });
+      barDone = true;
+    } else if (override && override.kind === "sweep") {
+      const step = Math.floor((now - override.start) / 260);
+      slots.forEach((s, i) => {
+        const c = doc.palette[(i + step) % doc.palette.length];
+        paintSlot(s, { color: c, effect: "solid", brightness: 0.9, speed: 0 }, t, "Workspace " + ((i + step) % doc.palette.length + 1));
+      });
+    } else if (override && override.kind === "confirm") {
+      const look = { color: doc.confirm, effect: "breath", brightness: 0.8, speed: 0.6 };
+      slots.forEach(s => paintSlot(s, look, t, "¿Seguro?"));
+    } else {
+      const step = Math.floor(t / 2.4);
+      slots.forEach((s, i) => {
+        const st = rotate ? STATES[(step + i) % STATES.length] : slotAssign[i];
+        paintSlot(s, doc.states[st], t, LABEL[st]);
+      });
+    }
+    if (!barDone) paintBar(doc.states[rotate ? STATES[Math.floor(t / 2.4 + 6) % STATES.length] : barAssign], t);
+    if (!reduce || override) requestAnimationFrame(frame);
+  }
+  function kick() { if (reduce) requestAnimationFrame(frame); }
+  function captionText() {
+    return reduce ? "Movimiento reducido: los efectos se muestran detenidos." : "Simulación en pantalla, no el LED real.";
+  }
+  document.getElementById("stage-caption").textContent = captionText();
+  requestAnimationFrame(frame);
+
+  const FILL_ORDER = ["working", "awaiting", "done", "error", "idle", "stalled"];
+  const FILL_GAP = 70, FILL_MS = 2500;
+  // A new override replaces the current one; a theme still filling in is committed
+  // first, so switching to a sweep never loses it. Fill over fill: the last one wins.
+  function startOverride(o) {
+    if (override && override.kind === "fill" && o.kind !== "fill" && override.onEnd) override.onEnd();
+    override = o;
+    if (reduce) requestAnimationFrame(frame); // otherwise the loop is already running
+  }
+  // Load a theme into the editor after the pad has shown it filling in.
+  function applyWithFill(next, done) {
+    const commit = () => { doc = next; syncAll(); changed(false); if (done) done(); };
+    if (reduce) { commit(); return; }
+    const now = performance.now();
+    startOverride({ kind: "fill", start: now, until: now + FILL_MS, next, onEnd: commit });
+    document.getElementById("stage-caption").textContent = `Cargando «${next.name}»: las teclas se llenan con el tema.`;
+  }
+  document.getElementById("btn-fill").addEventListener("click", () => {
+    if (reduce) { document.getElementById("stage-caption").textContent = "Movimiento reducido: sin animación de llenado."; return; }
+    const now = performance.now();
+    startOverride({ kind: "fill", start: now, until: now + FILL_MS, next: clone(doc) });
+    document.getElementById("stage-caption").textContent = `«${doc.name}»: las teclas se llenan con el tema.`;
+  });
+  document.getElementById("btn-sweep").addEventListener("click", () => {
+    const now = performance.now();
+    startOverride({ kind: "sweep", start: now, until: now + 2600 });
+    document.getElementById("stage-caption").textContent = "Barrido: los colores de workspace pasan por las teclas.";
+  });
+  document.getElementById("btn-confirm").addEventListener("click", () => {
+    const now = performance.now();
+    startOverride({ kind: "confirm", start: now, until: now + 3000 });
+    document.getElementById("stage-caption").textContent = "Confirmación: respirar al 80 % durante 3 s.";
+  });
+
+  // ---------- Editor ----------
+  const statesBox = document.getElementById("states");
+  const pct = v => Math.round(v * 100) + " %";
+  STATES.forEach(s => {
+    const row = document.createElement("div");
+    row.className = "st";
+    row.innerHTML = `
+      <div class="st-name"><span class="dot" id="dot-${s}"></span><span><strong>${LABEL[s]}</strong><small>${GLOSS[s]} <span class="mono">${s}</span></small></span></div>
+      <div class="st-color">
+        <input type="color" id="c-${s}" aria-label="Color de ${LABEL[s]}">
+        <input type="text" class="hex" id="h-${s}" aria-label="Color de ${LABEL[s]} en hexadecimal" spellcheck="false">
+      </div>
+      <label for="e-${s}">Efecto
+        <select id="e-${s}">${EFFECTS.map(e => `<option value="${e}">${EFFECT_LABEL[e]}${EXPORTABLE_EFFECTS.includes(e) ? "" : " (no exportable)"}</option>`).join("")}</select>
+      </label>
+      <label for="b-${s}">Brillo
+        <span class="rng"><input type="range" id="b-${s}" min="0" max="100" step="1"><output id="bo-${s}" for="b-${s}"></output></span>
+      </label>
+      <label for="s-${s}">Velocidad
+        <span class="rng"><input type="range" id="s-${s}" min="0" max="100" step="1"><output id="so-${s}" for="s-${s}"></output></span>
+      </label>`;
+    statesBox.appendChild(row);
+    const $ = id => document.getElementById(id);
+    $("c-" + s).addEventListener("input", e => { doc.states[s].color = e.target.value.toUpperCase(); changed(); });
+    $("h-" + s).addEventListener("input", e => {
+      const v = e.target.value;
+      e.target.setAttribute("aria-invalid", isHex(v) ? "false" : "true");
+      if (isHex(v)) { doc.states[s].color = normHex(v); changed(true, "h-" + s); }
+    });
+    $("e-" + s).addEventListener("change", e => { doc.states[s].effect = e.target.value; changed(); });
+    $("b-" + s).addEventListener("input", e => { doc.states[s].brightness = +e.target.value / 100; changed(); });
+    $("s-" + s).addEventListener("input", e => { doc.states[s].speed = +e.target.value / 100; changed(); });
+  });
+
+  function syncStates(skip) {
+    STATES.forEach(s => {
+      const a = doc.states[s];
+      const $ = id => document.getElementById(id);
+      $("c-" + s).value = a.color.toLowerCase();
+      if (skip !== "h-" + s) { $("h-" + s).value = a.color; $("h-" + s).setAttribute("aria-invalid", "false"); }
+      $("e-" + s).value = a.effect;
+      $("b-" + s).value = Math.round(a.brightness * 100);
+      $("bo-" + s).textContent = pct(a.brightness);
+      $("s-" + s).value = Math.round(a.speed * 100);
+      $("so-" + s).textContent = pct(a.speed);
+      const dot = $("dot-" + s);
+      dot.style.background = a.effect === "off" ? "transparent" : a.color;
+      dot.style.opacity = (0.3 + 0.7 * a.brightness).toFixed(2);
+    });
+  }
+
+  // Palette
+  const palBox = document.getElementById("palette");
+  function buildPalette() {
+    palBox.innerHTML = "";
+    doc.palette.forEach((c, i) => {
+      const item = document.createElement("div");
+      item.className = "pal-item";
+      item.innerHTML = `<span class="idx">${i + 1}</span>
+        <input type="color" id="p-${i}" aria-label="Color de workspace ${i + 1}" value="${c.toLowerCase()}">
+        <input type="text" class="hex" id="ph-${i}" aria-label="Color de workspace ${i + 1} en hexadecimal" value="${c}" spellcheck="false">
+        <button type="button" aria-label="Quitar color ${i + 1}" ${doc.palette.length <= 1 ? "disabled" : ""}>×</button>`;
+      palBox.appendChild(item);
+      item.querySelector('input[type="color"]').addEventListener("input", e => {
+        doc.palette[i] = e.target.value.toUpperCase();
+        document.getElementById("ph-" + i).value = doc.palette[i];
+        changed(false);
+      });
+      item.querySelector(".hex").addEventListener("input", e => {
+        const v = e.target.value;
+        e.target.setAttribute("aria-invalid", isHex(v) ? "false" : "true");
+        if (isHex(v)) { doc.palette[i] = normHex(v); document.getElementById("p-" + i).value = doc.palette[i].toLowerCase(); changed(false); }
+      });
+      item.querySelector("button").addEventListener("click", () => {
+        if (doc.palette.length <= 1) return;
+        doc.palette.splice(i, 1); buildPalette(); changed(false);
+      });
+    });
+    document.getElementById("pal-add").disabled = doc.palette.length >= PALETTE_MAX;
+    document.getElementById("pal-count").textContent = `${doc.palette.length} de ${PALETTE_MAX} colores`;
+  }
+  document.getElementById("pal-add").addEventListener("click", () => {
+    if (doc.palette.length >= PALETTE_MAX) return;
+    const used = doc.palette.map(hueOf).filter(h => h !== null);
+    const next = hsl2hex(((used.length ? used[used.length - 1] : 280) + 137) % 360, 90, 55).toUpperCase();
+    doc.palette.push(next); buildPalette(); changed(false);
+  });
+
+  // Confirm
+  const cc = document.getElementById("confirm-color"), ch = document.getElementById("confirm-hex");
+  cc.addEventListener("input", e => { doc.confirm = e.target.value.toUpperCase(); ch.value = doc.confirm; changed(false); });
+  ch.addEventListener("input", e => {
+    const v = e.target.value;
+    e.target.setAttribute("aria-invalid", isHex(v) ? "false" : "true");
+    if (isHex(v)) { doc.confirm = normHex(v); cc.value = doc.confirm.toLowerCase(); changed(false); }
+  });
+  function syncConfirm() { cc.value = doc.confirm.toLowerCase(); ch.value = doc.confirm; ch.setAttribute("aria-invalid", "false"); }
+
+  // Name
+  const nameIn = document.getElementById("theme-name");
+  nameIn.addEventListener("input", e => { doc.name = e.target.value; changed(false); });
+
+  // Themes
+  const themesBox = document.getElementById("themes");
+  THEMES.forEach(t => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "theme-btn"; b.dataset.id = t.id;
+    const strip = ["idle", "working", "awaiting", "done", "error"].map(s => t.states[s].color)
+      .concat(t.palette).map(c => `<span style="background:${c}"></span>`).join("");
+    b.innerHTML = `<span class="t-name">${t.name}</span><span class="strip">${strip}</span><span class="t-sum">${t.summary}</span>`;
+    b.addEventListener("click", () => applyWithFill(fromTheme(t)));
+    themesBox.appendChild(b);
+  });
+  function sameLook(a, b) {
+    return a.color.toUpperCase() === b.color.toUpperCase() && a.effect === b.effect &&
+      Math.abs(a.brightness - b.brightness) < 1e-6 && Math.abs(a.speed - b.speed) < 1e-6;
+  }
+  function currentTheme() {
+    return THEMES.find(t => STATES.every(s => sameLook(doc.states[s], t.states[s])) &&
+      t.palette.length === doc.palette.length && t.palette.every((c, i) => c.toUpperCase() === doc.palette[i].toUpperCase()) &&
+      t.confirm.toUpperCase() === doc.confirm.toUpperCase()) || null;
+  }
+
+  // Assignment
+  const assignBox = document.getElementById("assign");
+  const opts = sel => STATES.map(s => `<option value="${s}"${s === sel ? " selected" : ""}>${LABEL[s]}</option>`).join("");
+  for (let i = 0; i < 6; i++) {
+    const l = document.createElement("label");
+    l.htmlFor = "a-" + i;
+    l.innerHTML = `Tecla ${i + 1}<select id="a-${i}">${opts(slotAssign[i])}</select>`;
+    assignBox.appendChild(l);
+    l.querySelector("select").addEventListener("change", e => { slotAssign[i] = e.target.value; save(); kick(); });
+  }
+  (function () {
+    const l = document.createElement("label");
+    l.htmlFor = "a-bar";
+    l.innerHTML = `Barra de LED<select id="a-bar">${opts(barAssign)}</select>`;
+    assignBox.appendChild(l);
+    l.querySelector("select").addEventListener("change", e => { barAssign = e.target.value; save(); kick(); });
+  })();
+  const rot = document.getElementById("rotate");
+  rot.checked = rotate;
+  function syncAssignDisabled() { assignBox.querySelectorAll("select").forEach(s => { s.disabled = rotate; }); }
+  rot.addEventListener("change", () => { rotate = rot.checked; syncAssignDisabled(); save(); kick(); });
+  syncAssignDisabled();
+
+  // ---------- Export / import (formato.md, openboardTheme 1) ----------
+  const r4 = v => Math.round(v * 10000) / 10000;
+  function exportObject() {
+    const states = {};
+    STATES.forEach(s => {
+      const a = doc.states[s];
+      states[s] = { color: a.color.toUpperCase(), effect: a.effect, brightness: r4(a.brightness), speed: r4(a.speed) };
+    });
+    return { openboardTheme: 1, name: doc.name.trim(), states, palette: doc.palette.map(c => c.toUpperCase()), confirm: doc.confirm.toUpperCase() };
+  }
+  function exportText() {
+    // One state per line, like the example in formato.md.
+    const o = exportObject();
+    const lines = STATES.map((s, i) => `    ${JSON.stringify(s)}: ${JSON.stringify(o.states[s]).replace(/,"/g, ', "').replace(/":/g, '": ')}${i < STATES.length - 1 ? "," : ""}`);
+    return `{\n  "openboardTheme": 1,\n  "name": ${JSON.stringify(o.name)},\n  "states": {\n${lines.join("\n")}\n  },\n  "palette": ${JSON.stringify(o.palette).replace(/,/g, ", ")},\n  "confirm": ${JSON.stringify(o.confirm)}\n}`;
+  }
+
+  function colorFrom(v, path, errs) {
+    if (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 0xFFFFFF) return "#" + v.toString(16).padStart(6, "0").toUpperCase();
+    if (typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v.trim())) return v.trim().toUpperCase();
+    errs.push(`${path} ${JSON.stringify(v)} no es un color`);
+    return null;
+  }
+  function unit(v, path, errs, required) {
+    if (v === undefined) { if (required) errs.push(`falta ${path}`); return 0; }
+    if (typeof v !== "number" || !isFinite(v) || v < 0 || v > 1) { errs.push(`${path} debe ser un número entre 0 y 1`); return 0; }
+    return v;
+  }
+  function parseTheme(text) {
+    let o;
+    try { o = JSON.parse(text); } catch (e) { return { errs: ["el texto no es JSON válido"] }; }
+    const errs = [];
+    if (!o || typeof o !== "object" || Array.isArray(o) || o.openboardTheme === undefined) return { errs: ["no es un tema de OpenBoard"] };
+    if (o.openboardTheme !== 1) return { errs: [`versión ${o.openboardTheme} no soportada`] };
+    const name = typeof o.name === "string" ? o.name.trim() : "";
+    if (typeof o.name !== "string") errs.push("falta name");
+    else if (name.length < 1 || name.length > NAME_MAX) errs.push("name debe tener de 1 a 40 caracteres");
+    const states = {};
+    if (!o.states || typeof o.states !== "object") errs.push("falta states");
+    else STATES.forEach(s => {
+      const a = o.states[s];
+      if (!a || typeof a !== "object") { errs.push(`falta states.${s}`); return; }
+      const color = colorFrom(a.color, `states.${s}.color`, errs);
+      let effect = a.effect;
+      if (effect === undefined) errs.push(`falta states.${s}.effect`);
+      else if (!EXPORTABLE_EFFECTS.includes(effect)) errs.push(`states.${s}.effect ${JSON.stringify(effect)} no es válido`);
+      const brightness = unit(a.brightness, `states.${s}.brightness`, errs, true);
+      const speed = unit(a.speed, `states.${s}.speed`, errs, false);
+      states[s] = { color, effect, brightness, speed };
+    });
+    let palette = [];
+    if (!Array.isArray(o.palette)) errs.push("falta palette");
+    else if (o.palette.length === 0) errs.push("palette está vacía");
+    else if (o.palette.length > PALETTE_MAX) errs.push(`palette tiene ${o.palette.length} colores; el máximo es ${PALETTE_MAX}`);
+    else palette = o.palette.map((c, i) => colorFrom(c, `palette[${i}]`, errs));
+    const confirm = o.confirm === undefined ? (errs.push("falta confirm"), null) : colorFrom(o.confirm, "confirm", errs);
+    if (errs.length) return { errs };
+    return { doc: { name, states, palette, confirm } };
+  }
+
+  const exportBox = document.getElementById("export");
+  const copyBtn = document.getElementById("btn-copy");
+  const copyStatus = document.getElementById("copy-status");
+  copyBtn.addEventListener("click", () => {
+    const text = exportText();
+    const res = evaluate();
+    const blocked = res.blocking.filter(r => !r.pass);
+    if (blocked.length) {
+      copyStatus.className = "status err";
+      copyStatus.textContent = "OpenBoard rechazaría este tema: " + blocked.map(r => r.title.toLowerCase()).join("; ") + ". Corrígelo en las reglas de arriba.";
+      return;
+    }
+    const warns = res.meaning.concat(res.palette, res.contrast).filter(r => !r.pass).length;
+    const okMsg = warns ? `Copiado. Tiene ${warns} ${warns === 1 ? "aviso" : "avisos"}: OpenBoard te pedirá confirmarlo.` : "Copiado. Pégalo en OpenBoard con «Pegar del portapapeles».";
+    const fallback = () => {
+      exportBox.focus(); exportBox.select();
+      copyStatus.className = "status err";
+      copyStatus.textContent = "Este visor no deja copiar. El texto quedó seleccionado: cópialo con ⌘C o Ctrl+C.";
+    };
+    try {
+      navigator.clipboard.writeText(text).then(() => {
+        copyStatus.className = "status ok"; copyStatus.textContent = okMsg;
+      }, fallback);
+    } catch (e) { fallback(); }
+  });
+
+  document.getElementById("btn-import").addEventListener("click", () => {
+    const st = document.getElementById("import-status");
+    const r = parseTheme(document.getElementById("import").value);
+    if (r.errs) {
+      st.className = "status err";
+      st.textContent = "No se importó: " + r.errs.slice(0, 6).join("; ") + (r.errs.length > 6 ? ` y ${r.errs.length - 6} más.` : ".");
+      return;
+    }
+    st.className = "status ok";
+    st.textContent = reduce ? "" : `Cargando «${r.doc.name}»…`;
+    applyWithFill(r.doc, () => { st.className = "status ok"; st.textContent = `Importado «${r.doc.name}».`; });
+  });
+
+  document.getElementById("persist").addEventListener("change", e => { if (e.target.checked) save(); else forget(); });
+
+  // ---------- Render ----------
+  const rulesBox = document.getElementById("rules");
+  function renderRules() {
+    const res = evaluate();
+    const groups = [["blocking", "Para poder exportar"], ["meaning", "Significado"], ["palette", "Paleta"], ["contrast", "Contraste"]];
+    let total = 0, passed = 0, blocked = 0;
+    rulesBox.innerHTML = "";
+    groups.forEach(([k, title]) => {
+      const h = document.createElement("li");
+      h.style.cssText = "background:none;padding:4px 0 0;display:block";
+      h.innerHTML = `<span class="eyebrow group-title">${title}</span>`;
+      rulesBox.appendChild(h);
+      res[k].forEach(r => {
+        total++; if (r.pass) passed++; else if (k === "blocking") blocked++;
+        const li = document.createElement("li");
+        li.className = r.pass ? "pass" : (k === "blocking" ? "block" : "fail");
+        li.innerHTML = `<span class="mark" aria-hidden="true">${r.pass ? "✓" : "⚠︎"}</span><span class="r-title"></span><span class="r-detail"></span>`;
+        li.querySelector(".r-title").textContent = (r.pass ? "" : "") + r.title;
+        li.querySelector(".r-detail").textContent = r.detail;
+        li.setAttribute("aria-label", (r.pass ? "Cumple: " : "No cumple: ") + r.title + ". " + r.detail);
+        rulesBox.appendChild(li);
+      });
+    });
+    const score = document.getElementById("score");
+    score.textContent = `${passed} de ${total} cumplidas`;
+    score.className = "score " + (passed === total ? "ok" : "warn");
+    copyBtn.textContent = blocked ? "Corrige antes de copiar" : "Copiar JSON";
+  }
+  function syncAll() {
+    syncStates(); buildPalette(); syncConfirm(); nameIn.value = doc.name;
+  }
+  let saveTimer = null;
+  function changed(syncInputs = true, skip) {
+    if (syncInputs) syncStates(skip);
+    const cur = currentTheme();
+    document.getElementById("theme-now").textContent = cur ? "Tema: " + cur.name : "Tema: personalizado";
+    themesBox.querySelectorAll(".theme-btn").forEach(b => b.setAttribute("aria-pressed", cur && cur.id === b.dataset.id ? "true" : "false"));
+    exportBox.value = exportText();
+    renderRules();
+    copyStatus.textContent = "";
+    clearTimeout(saveTimer); saveTimer = setTimeout(save, 300);
+    kick();
+  }
+  syncAll();
+  changed(true);
+})();
+</script>

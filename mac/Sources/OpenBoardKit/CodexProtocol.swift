@@ -349,6 +349,25 @@ public enum CodexError: Error, LocalizedError {
 }
 
 /**
+ A device notification line, in either key spelling.
+
+ The genuine pad abbreviates to `{"m":…,"p":…}`; the ESP32-S3 clone spells it out as
+ `{"method":…,"params":…}`. Both carry the same payload, so accept either.
+ */
+struct NotificationEnvelope<Payload: Decodable>: Decodable {
+    let m: String
+    let p: Payload
+
+    private enum Keys: String, CodingKey { case m, p, method, params }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        m = try c.decodeIfPresent(String.self, forKey: .m) ?? c.decode(String.self, forKey: .method)
+        p = try c.decodeIfPresent(Payload.self, forKey: .p) ?? c.decode(Payload.self, forKey: .params)
+    }
+}
+
+/**
  A key event broadcast by the device.
 
  The pad reports every press on the vendor channel as an unsolicited notification —
@@ -374,13 +393,9 @@ public struct KeyEvent: Equatable, Sendable {
     public let key: String
     public let action: Action
 
-    private struct Envelope: Decodable {
-        struct Payload: Decodable {
-            let k: String
-            let act: Int
-        }
-        let m: String
-        let p: Payload
+    private struct Payload: Decodable {
+        let k: String
+        let act: Int
     }
 
     /// Parse one line of the RPC stream, or nil if it is not a key event.
@@ -388,7 +403,7 @@ public struct KeyEvent: Equatable, Sendable {
     /// Our own writes are acknowledged on this same channel and carry `result`
     /// rather than `m`, so anything without `m: "v.oai.hid"` is skipped.
     public static func parse(_ data: Data) -> KeyEvent? {
-        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
+        guard let envelope = try? JSONDecoder().decode(NotificationEnvelope<Payload>.self, from: data),
               envelope.m == "v.oai.hid",
               let action = Action(rawValue: envelope.p.act)
         else { return nil }

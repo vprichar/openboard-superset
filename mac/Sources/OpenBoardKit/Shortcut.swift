@@ -41,12 +41,43 @@ public struct Shortcut: Equatable, Sendable {
     public var modifiers: Set<Modifier>
     public var key: String
     public var mode: Mode
+    /**
+     How many times one press sends a tapped chord — 2 turns ESC into Claude Code's
+     double Esc. Stored as `repeat`; clamped to `repeatRange`. Ignored for `.hold`,
+     which keeps the chord down instead.
+     */
+    public var repeats: Int {
+        didSet { repeats = Self.clampRepeats(repeats) }
+    }
 
-    public init(keyCode: Int, modifiers: Set<Modifier> = [], key: String, mode: Mode = .tap) {
+    public static let repeatRange = 1...5
+    /**
+     The pause between repeated sends. Fixed, not a setting: short enough that the two
+     keys read as one gesture (Claude Code's double Esc wants them close), long enough
+     that the terminal sees two separate keystrokes rather than one.
+     */
+    public static let repeatGap: TimeInterval = 0.06
+
+    public init(keyCode: Int, modifiers: Set<Modifier> = [], key: String, mode: Mode = .tap, repeats: Int = 1) {
         self.keyCode = keyCode
         self.modifiers = modifiers
         self.key = key
         self.mode = mode
+        self.repeats = Self.clampRepeats(repeats)
+    }
+
+    static func clampRepeats(_ n: Int) -> Int {
+        min(max(n, repeatRange.lowerBound), repeatRange.upperBound)
+    }
+
+    /**
+     When to send, relative to the previous send: the first at once, each repeat
+     `repeatGap` later. One entry for a hold, whatever `repeats` says. The controller
+     sends exactly this sequence, so its order and count are what the tests pin.
+     */
+    public var sendDelays: [TimeInterval] {
+        let count = mode == .tap ? repeats : 1
+        return [0] + Array(repeating: Self.repeatGap, count: count - 1)
     }
 
     /// What push-to-talk holds: space, no modifiers.
@@ -74,15 +105,22 @@ public struct Shortcut: Equatable, Sendable {
         modifiers = Set(names.compactMap(Modifier.init(rawValue:)))
         key = json["key"] as? String ?? ""
         mode = (json["mode"] as? String).flatMap(Mode.init(rawValue:)) ?? .tap
+        // Only a whole number counts; "2" or 2.7 typed by hand read as once.
+        let raw = json["repeat"].flatMap { $0 as? NSNumber }
+        let whole = raw.flatMap { CFNumberIsFloatType($0) ? nil : $0.intValue }
+        repeats = Self.clampRepeats(whole ?? 1)
     }
 
     /// Modifiers written in `allCases` order, so a save never reorders the file.
+    /// `repeat` only when it is not 1, so existing files are written back unchanged.
     public var json: [String: Any] {
-        [
+        var fields: [String: Any] = [
             "keyCode": keyCode,
             "modifiers": Modifier.allCases.filter(modifiers.contains).map(\.rawValue),
             "key": key,
             "mode": mode.rawValue,
         ]
+        if repeats != 1 { fields["repeat"] = repeats }
+        return fields
     }
 }

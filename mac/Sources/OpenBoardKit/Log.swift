@@ -25,8 +25,31 @@ public enum Log {
         AppPaths.logs().appendingPathComponent("app.log")
     }
 
+    private static let secretsLock = NSLock()
+    nonisolated(unsafe) private static var secrets: [String] = []
+
+    /// Keep this token out of every line written from now on — see `LogRedactor`.
+    /// Registering the same token twice is harmless.
+    public static func registerSecret(_ token: SecretToken) {
+        token.withRaw { raw in
+            guard !raw.isEmpty else { return }
+            secretsLock.lock()
+            defer { secretsLock.unlock() }
+            if !secrets.contains(raw) { secrets.append(raw) }
+        }
+    }
+
+    /// A message as it would be written: scrubbed of registered secrets, bearer
+    /// credentials and token parameters. `write` always goes through this.
+    public static func redact(_ message: String) -> String {
+        secretsLock.lock()
+        let known = secrets
+        secretsLock.unlock()
+        return LogRedactor.redact(message, secrets: known)
+    }
+
     public static func write(_ message: String) {
-        let line = "\(ISO8601DateFormatter().string(from: Date())) \(message)\n"
+        let line = "\(ISO8601DateFormatter().string(from: Date())) \(redact(message))\n"
         queue.async {
             let url = Self.url
             try? FileManager.default.createDirectory(
@@ -70,5 +93,59 @@ public enum Log {
         guard previous != current else { return previous }
         write("\(label): \(current)")
         return current
+    }
+}
+
+/**
+ What keeps the host-service token out of `app.log`.
+
+ The log is what gets attached to "send me your logs", and the token in Superset's
+ `manifest.json` opens every workspace on the machine. So every line is scrubbed on
+ its way in, whoever wrote it:
+
+ - every registered secret, wherever in the line it sits
+ - `Bearer <credential>` (the `Authorization` header), any case
+ - a URL with a `token=` parameter is cut down to its path — the port changes on
+   every Superset launch and says nothing, the token says too much
+ - any remaining `token=` parameter
+
+ Cheap by design, because every `Log.write` pays for it: one `replacingOccurrences` per
+ secret, and the patterns only run when a cheap substring check says they could match.
+ */
+public enum LogRedactor {
+    public static let marker = "«redacted»"
+
+    private static let bearer = try! NSRegularExpression(
+        pattern: #"(?i)\b(bearer)\s+[^\s"',;]+"#
+    )
+    private static let urlWithToken = try! NSRegularExpression(
+        pattern: #"(?i)\b[a-z][a-z0-9+.-]*://[^/\s?#]+(/[^\s?#]*)?\?[^\s#]*\btoken=[^\s#]*(#\S*)?"#
+    )
+    private static let tokenParameter = try! NSRegularExpression(
+        pattern: #"(?i)\b(token=)[^\s&#"']+"#
+    )
+
+    public static func redact(_ line: String, secrets: [String]) -> String {
+        var result = line
+        for secret in secrets where !secret.isEmpty {
+            result = result.replacingOccurrences(of: secret, with: marker)
+        }
+        let lowered = result.lowercased()
+        if lowered.contains("bearer") {
+            result = replace(bearer, in: result, with: "$1 \(marker)")
+        }
+        if lowered.contains("token=") {
+            result = replace(urlWithToken, in: result, with: "$1")
+            result = replace(tokenParameter, in: result, with: "$1\(marker)")
+        }
+        return result
+    }
+
+    private static func replace(
+        _ pattern: NSRegularExpression, in text: String, with template: String
+    ) -> String {
+        pattern.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: template
+        )
     }
 }

@@ -18,6 +18,10 @@ import OpenBoardKit
    `origin` knew about cmux, fell through to opening the folder in an editor. Its own
    socket addresses a surface by id instead, which is exact and needs no Automation
    grant. See `Cmux`.
+ - **Superset: by workspace deep link.** A session whose hook carried
+   `SUPERSET_WORKSPACE_ID` opens `superset://v2-workspace/<id>`, which selects the
+   workspace and brings Superset forward. Workspace-exact, not pane-exact: Superset has
+   no known link to a specific terminal.
  - **VS Code: approximate.** An extension-hosted session has no tty, so the window for
    the workspace folder is raised. That focuses the right window, not the specific
    Claude panel inside it — an honest limit rather than a bug to chase.
@@ -41,6 +45,12 @@ enum Focus {
 
     @discardableResult
     static func raise(_ slot: SlotView) -> Outcome {
+        // First: a Superset terminal has a real pty, so it would otherwise take the
+        // Terminal/iTerm2 tty walk and match nothing.
+        if let workspace = slot.supersetWorkspaceID {
+            return focusSuperset(workspace: workspace, terminal: slot.supersetTerminalID)
+        }
+
         /*
          A session running in VS Code's integrated terminal has a real pty, so it used
          to take the Terminal branch, fail to find a matching tab — Terminal.app does
@@ -127,6 +137,33 @@ enum Focus {
             return activateVSCode()
         }
         return .raised(method: "vscode-session")
+    }
+
+    /// Superset's URL scheme; opening it also activates the app.
+    static let supersetScheme = "superset"
+    static let supersetBundleID = "com.superset.desktop"
+
+    /// Open the session's Superset workspace via deep link, bringing Superset forward.
+    /// Superset's workspace route accepts `terminalId` + a fresh `focusRequestId` to
+    /// select that terminal's tab, which matters when one workspace hosts several sessions.
+    private static func focusSuperset(workspace: String, terminal: String?) -> Outcome {
+        var components = URLComponents()
+        components.scheme = supersetScheme
+        components.host = "v2-workspace"
+        components.path = "/" + workspace
+        if let terminal {
+            components.queryItems = [
+                URLQueryItem(name: "terminalId", value: terminal),
+                URLQueryItem(name: "focusRequestId", value: UUID().uuidString.lowercased()),
+            ]
+        }
+        guard let url = components.url else { return .failed("invalid Superset workspace id") }
+        guard NSWorkspace.shared.urlForApplication(toOpen: url) != nil else {
+            return .failed("no app handles \(supersetScheme):// — is Superset installed?")
+        }
+        return NSWorkspace.shared.open(url)
+            ? .raised(method: "superset-workspace")
+            : .failed("could not open \(url.absoluteString)")
     }
 
     /**

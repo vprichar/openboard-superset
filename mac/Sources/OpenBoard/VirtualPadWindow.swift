@@ -48,7 +48,7 @@ final class VirtualPadWindowController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        created.title = "Virtual Pad"
+        created.title = tr("Pad virtual")
         created.isFloatingPanel = true
         created.level = .floating
         created.isReleasedWhenClosed = false
@@ -85,6 +85,7 @@ final class VirtualPadState: ObservableObject {
 struct VirtualPadView: View {
     @ObservedObject var state: VirtualPadState
     let pad: VirtualPad
+    @AppStorage(UIStrings.defaultsKey) private var uiLanguage = UIStrings.defaultLanguage.rawValue
 
     private static let unit: CGFloat = 44
     private static let gap: CGFloat = 6
@@ -102,11 +103,16 @@ struct VirtualPadView: View {
                 dialButton("⟲") { pad.turnEncoder(clockwise: false) }
                 dialButton("⟳") { pad.turnEncoder(clockwise: true) }
                 Spacer()
-                Text("Simulated — the same bytes as hardware")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+                ForEach(Joystick.Direction.allCases, id: \.self) { direction in
+                    dialButton(Self.arrow(direction)) { push(direction) }
+                        .help(Self.pushHelp(direction))
+                }
             }
+            Text(tr("Simulado: los mismos bytes que el hardware. Mantén una tecla para mantenerla de verdad."))
+                .font(.system(size: 9))
+                .foregroundStyle(.secondary)
         }
+        .id(uiLanguage)
         .padding(14)
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -174,6 +180,41 @@ struct VirtualPadView: View {
     }
 
     @State private var pressed: Set<String> = []
+
+    /**
+     Push the stick one way, as the hardware reports it: an angle round the rim.
+
+     Which angle is "up" is a setting (`joystick.northAngle`, `clockwise`), so the
+     angle is found by asking the same `Joystick.direction(for:)` the dispatcher uses
+     which cardinal it lands on — never by redoing that arithmetic here.
+     */
+    private func push(_ direction: Joystick.Direction) {
+        let prefs = PreferencesStore.shared.load().joystick
+        let stick = Joystick(northAngle: prefs.northAngle, clockwise: prefs.clockwise, threshold: prefs.threshold)
+        let cardinals = (0..<4).map { (prefs.northAngle + Double($0) * 0.25).truncatingRemainder(dividingBy: 1) }
+        guard let angle = cardinals.first(where: { stick.direction(for: $0) == direction }) else { return }
+        pad.pushStick(angle: angle)
+    }
+
+    private static func arrow(_ direction: Joystick.Direction) -> String {
+        switch direction {
+        case .up: "↑"
+        case .down: "↓"
+        case .left: "←"
+        case .right: "→"
+        }
+    }
+
+    /// Whole sentences per direction: the two languages do not put the direction in
+    /// the same place.
+    private static func pushHelp(_ direction: Joystick.Direction) -> String {
+        switch direction {
+        case .up: tr("Empuja el joystick hacia arriba")
+        case .down: tr("Empuja el joystick hacia abajo")
+        case .left: tr("Empuja el joystick a la izquierda")
+        case .right: tr("Empuja el joystick a la derecha")
+        }
+    }
 
     private func label(for cell: BoardCell) -> String {
         if case .agent = cell.kind { return "S\(cell.slot ?? 0)" }

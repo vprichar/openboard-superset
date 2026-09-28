@@ -10,6 +10,8 @@ import OpenBoardKit
  the implementation.
  */
 func runRegistryTests() {
+    // F7 lives with the registry tests: keys → sessions → a terminal (no suite of its own).
+    targetedControlChecks()
     let alwaysAlive: (Int?) -> Bool = { _ in true }
     let neverAlive: (Int?) -> Bool = { _ in false }
 
@@ -48,13 +50,61 @@ func runRegistryTests() {
         expectEqual(registry.entries.count, 1, "the old entry is replaced, not kept alongside")
     }
 
+    test("a cleared session in a still-running process reuses its own slot") {
+        // `/clear` keeps the same Claude process, so its pid is alive — that liveness
+        // is the new session's. Requiring the old entry to look dead left a ghost key
+        // for the pre-clear session, with a jump landing in the same tab as the new one.
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "before", pid: 100, tty: "/dev/ttys001", isAlive: alwaysAlive)
+        let after = registry.claim(
+            sessionID: "after", pid: 100, tty: "/dev/ttys001", isAlive: alwaysAlive
+        )
+        expectEqual(after.mode, .sameHost)
+        expectEqual(after.entry?.slot, 1)
+        expectEqual(registry.entries.count, 1, "no ghost key for the pre-clear session")
+    }
+
+    test("/clear keeps the session's place in the board order") {
+        // The pad is drawn sorted by `boardOrder`, not by registry slot. A `/clear`
+        // is the same tab, so it must stay where it was on the pad — inheriting the
+        // order, not taking a new one and jumping to the end. The slot is freed and
+        // re-used first so the slot number and the order disagree, and a
+        // `boardOrder` that merely mirrors the slot is caught.
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "a", pid: 1, isAlive: alwaysAlive)
+        _ = registry.claim(sessionID: "b", pid: 2, isAlive: alwaysAlive)
+        registry.release(sessionID: "a")
+        let c = try Harness.require(registry.claim(sessionID: "c", pid: 3, isAlive: alwaysAlive).entry)
+        expectEqual(c.slot, 1)
+        let cleared = registry.claim(sessionID: "c2", pid: 3, isAlive: alwaysAlive)
+        expectEqual(cleared.mode, .sameHost)
+        expectEqual(cleared.entry?.boardOrder, c.boardOrder, "the cleared tab moved on the pad")
+        expect((cleared.entry?.boardOrder ?? 0) > (registry.entry(forSession: "b")?.boardOrder ?? .max),
+               "c was claimed after b, so it stays after b")
+    }
+
+    test("a new session goes last even when it takes a freed low slot") {
+        // Registry slots are reused lowest-first; the pad must not follow them, or a
+        // new session pushes every existing one a key to the right.
+        var registry = SessionRegistry()
+        for (index, id) in ["a", "b", "c"].enumerated() {
+            _ = registry.claim(sessionID: id, pid: index + 1, isAlive: alwaysAlive)
+        }
+        registry.release(sessionID: "a")
+        let d = try Harness.require(registry.claim(sessionID: "d", pid: 9, isAlive: alwaysAlive).entry)
+        expectEqual(d.slot, 1, "the registry still reuses the lowest free slot")
+        let order = registry.entries.sorted { $0.boardOrder < $1.boardOrder }.map(\.sessionID)
+        expectEqual(order, ["b", "c", "d"])
+    }
+
     test("a live session sharing a tty does not lose its key") {
-        // The same-host rule only applies to a session that is genuinely finished or
-        // gone; otherwise it would steal a key from something still running.
+        // A tty match alone (a different process in the same tab) only reuses a
+        // session that is genuinely finished or gone; otherwise it would steal a key
+        // from something still running.
         var registry = SessionRegistry()
         _ = registry.claim(sessionID: "live", pid: 100, tty: "/dev/ttys001", isAlive: alwaysAlive)
         let other = registry.claim(
-            sessionID: "new", pid: 100, tty: "/dev/ttys001", isAlive: alwaysAlive
+            sessionID: "new", pid: 200, tty: "/dev/ttys001", isAlive: alwaysAlive
         )
         expectEqual(other.mode, .unused, "must take a fresh slot")
         expectEqual(other.entry?.slot, 2)
@@ -451,6 +501,233 @@ func runRegistryTests() {
             "an unrelated subtype must not be suppressed"
         )
     }
+
+    test("stateSince starts at the claim and moves only when the state does") {
+        // "How long has it been waiting" is measured from the state change, not from
+        // the last event — a repeated hook must not reset the clock.
+        let t0 = Date(timeIntervalSince1970: 1_790_000_000)
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "a", pid: 1, state: .working, now: t0, isAlive: alwaysAlive)
+        expectEqual(registry.entry(forSession: "a")?.stateSince, t0)
+
+        registry.setState(sessionID: "a", to: .awaiting, now: t0.addingTimeInterval(5))
+        expectEqual(registry.entry(forSession: "a")?.stateSince, t0.addingTimeInterval(5))
+
+        registry.setState(sessionID: "a", to: .awaiting, now: t0.addingTimeInterval(9))
+        expectEqual(registry.entry(forSession: "a")?.stateSince, t0.addingTimeInterval(5),
+                    "the same state again reset the clock")
+        expectEqual(registry.entry(forSession: "a")?.updatedAt, t0.addingTimeInterval(9))
+
+        _ = registry.claim(sessionID: "a", pid: 1, state: .working, now: t0.addingTimeInterval(20),
+                           isAlive: alwaysAlive)
+        expectEqual(registry.entry(forSession: "a")?.stateSince, t0.addingTimeInterval(20),
+                    "a re-claim that changes the state restarts the clock")
+    }
+
+    test("a decayed state restarts stateSince") {
+        let t0 = Date(timeIntervalSince1970: 1_790_000_000)
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "a", pid: 1, state: .done, now: t0, isAlive: alwaysAlive)
+        _ = registry.decay(doneAfter: 90, now: t0.addingTimeInterval(91))
+        expectEqual(registry.entry(forSession: "a")?.state, .idle)
+        expectEqual(registry.entry(forSession: "a")?.stateSince, t0.addingTimeInterval(91))
+    }
+
+    test("a live event confirms a restored entry") {
+        // Unconfirmed is only ever a stand-in until something live speaks. The first
+        // hook for the session is that word, whatever it says.
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ob-registry-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let t0 = Date()
+        var saved = SessionRegistry()
+        _ = saved.claim(sessionID: "a", pid: 1, state: .awaiting, now: t0, isAlive: alwaysAlive)
+        _ = saved.claim(sessionID: "b", pid: 2, state: .awaiting, now: t0, isAlive: alwaysAlive)
+        RegistryStore.save(saved, url: url)
+
+        var loaded = RegistryStore.load(url: url, now: t0, isAlive: alwaysAlive)
+        expectEqual(loaded.entry(forSession: "a")?.isUnconfirmed, true)
+
+        loaded.setState(sessionID: "a", to: .awaiting, now: t0.addingTimeInterval(1))
+        expectEqual(loaded.entry(forSession: "a")?.isUnconfirmed, false, "same state still confirms")
+        expectEqual(loaded.entry(forSession: "b")?.isUnconfirmed, true, "only the session spoken for")
+
+        _ = loaded.claim(sessionID: "b", pid: 2, state: .working, now: t0.addingTimeInterval(2),
+                         isAlive: alwaysAlive)
+        expectEqual(loaded.entry(forSession: "b")?.isUnconfirmed, false, "a re-claim is a live event")
+        expectEqual(loaded.entry(forSession: "b")?.state, .working)
+    }
+
+    test("a fresh claim is never unconfirmed") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "a", pid: 1, state: .awaiting, isAlive: alwaysAlive)
+        expectEqual(registry.entry(forSession: "a")?.isUnconfirmed, false)
+    }
+
+    // MARK: - sessions from Superset's bus (F3)
+
+    let t0 = Date(timeIntervalSince1970: 1_790_000_000)
+    func at(_ s: TimeInterval) -> Date { t0.addingTimeInterval(s) }
+    func event(_ type: LifecycleType, _ terminal: String = "t-codex", agent: String = "codex",
+               workspace: String = "ws-1", at time: Date) -> LifecycleEvent {
+        LifecycleEvent(type: type, terminalID: terminal, workspaceID: workspace, agent: agent, at: time)
+    }
+    func change(_ state: SessionState, _ terminal: String = "t-codex", agent: String = "codex") -> LifecycleMapper.Change {
+        LifecycleMapper.Change(terminalID: terminal, workspaceID: "ws-1", agent: agent, state: state)
+    }
+
+    test("a session born on the bus (Codex) takes a key and gives it back on Detached") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "claude-1", pid: 1, isAlive: alwaysAlive)
+        var mapper = LifecycleMapper(startDebounce: 0.2, dedupeWindow: 1.5)
+
+        // Codex has no hooks: Attached is the first word of it, and it gets a key.
+        let attached = try Harness.require(mapper.ingest(event(.attached, at: at(0)), from: .bus, now: at(0)))
+        let outcome = registry.applyBus(attached, mayClaim: true, now: at(0), isAlive: alwaysAlive)
+        expectEqual(outcome, .claimed(slot: 2))
+        let entry = try Harness.require(registry.entry(forTerminal: "t-codex"))
+        expect(entry.isBusBorn)
+        expectEqual(entry.state, .idle)
+        expectEqual(entry.supersetWorkspaceID, "ws-1")
+        expectEqual(entry.supersetTerminalID, "t-codex")
+
+        // It works: a Start is held for the debounce, then paints working.
+        expect(mapper.ingest(event(.start, at: at(1)), from: .bus, now: at(1)) == nil)
+        for due in mapper.flush(now: at(1.3)) {
+            _ = registry.applyBus(due, mayClaim: true, now: at(1.3), isAlive: alwaysAlive)
+        }
+        expectEqual(registry.entry(forTerminal: "t-codex")?.state, .working)
+
+        // No pid, and it is not reclaimable for that: the process is not ours to see.
+        expect(!registry.isReclaimable(try Harness.require(registry.entry(forTerminal: "t-codex")),
+                                        now: at(2), isAlive: neverAlive))
+        expectEqual(registry.prune(now: at(2), isAlive: neverAlive), 1, "only the Claude pid is gone")
+        expect(registry.entry(forTerminal: "t-codex") != nil, "prune kept the bus session")
+
+        // Detached: the key is free again, and the next session takes it.
+        expectEqual(registry.releaseBus(terminalID: "t-codex"), 2)
+        expect(registry.entry(forSlot: 2) == nil)
+        expectEqual(registry.claim(sessionID: "next", pid: 9, isAlive: alwaysAlive).entry?.slot, 1)
+    }
+
+    test("a bus session also ends when Superset stops listing its terminal") {
+        var registry = SessionRegistry()
+        _ = registry.applyBus(change(.working), mayClaim: true, now: at(0), isAlive: alwaysAlive)
+        _ = registry.applyBus(change(.done, "t-other"), mayClaim: true, now: at(0), isAlive: alwaysAlive)
+        let changed = registry.syncBus(
+            bindings: [AgentBinding(terminalID: "t-other", workspaceID: "ws-1", agent: "codex", lastEventType: .stop)],
+            hookedAgents: ["claude"], now: at(5), isAlive: alwaysAlive
+        )
+        expect(changed)
+        expect(registry.entry(forTerminal: "t-codex") == nil, "a terminal no longer listed kept its key")
+        expectEqual(registry.entry(forTerminal: "t-other")?.state, .done)
+    }
+
+    test("the launch sync seeds unhooked agents and leaves Claude to its hooks") {
+        var registry = SessionRegistry()
+        _ = registry.syncBus(
+            bindings: [
+                AgentBinding(terminalID: "t-codex", workspaceID: "ws-1", agent: "codex", lastEventType: .permissionRequest),
+                AgentBinding(terminalID: "t-claude", workspaceID: "ws-1", agent: "claude", lastEventType: .start),
+                AgentBinding(terminalID: "t-gone", workspaceID: "ws-1", agent: "codex", lastEventType: .detached),
+                AgentBinding(terminalID: "t-new", workspaceID: "ws-2", agent: "opencode"),
+            ],
+            hookedAgents: ["claude"], now: at(0), isAlive: alwaysAlive
+        )
+        expectEqual(registry.entry(forTerminal: "t-codex")?.state, .awaiting)
+        expect(registry.entry(forTerminal: "t-claude") == nil, "Claude has hooks; the bus must not add a second key")
+        expect(registry.entry(forTerminal: "t-gone") == nil)
+        expectEqual(registry.entry(forTerminal: "t-new")?.state, .idle, "no event yet reads as idle")
+    }
+
+    test("Failed paints error, for a bus session and for a hooked one") {
+        var registry = SessionRegistry()
+        var mapper = LifecycleMapper(startDebounce: 0.2, dedupeWindow: 1.5)
+        _ = registry.applyBus(change(.working), mayClaim: true, now: at(0), isAlive: alwaysAlive)
+        let failed = try Harness.require(mapper.ingest(event(.failed, at: at(1)), from: .bus, now: at(1)))
+        expectEqual(failed.state, .error)
+        _ = registry.applyBus(failed, mayClaim: true, now: at(1), isAlive: alwaysAlive)
+        expectEqual(registry.entry(forTerminal: "t-codex")?.state, .error)
+
+        // A Claude session the hooks own, in a Superset terminal.
+        _ = registry.claim(sessionID: "claude-1", pid: 1, state: .working, isAlive: alwaysAlive)
+        registry.enrich(sessionID: "claude-1", supersetWorkspaceID: "ws-1", supersetTerminalID: "t-claude")
+        let outcome = registry.applyBus(change(.error, "t-claude", agent: "claude"), mayClaim: false, now: at(2), isAlive: alwaysAlive)
+        expectEqual(outcome, .updated(sessionID: "claude-1"))
+        expectEqual(registry.entry(forSession: "claude-1")?.state, .error, "a failed turn must not read as done")
+    }
+
+    test("the bus does not repaint a hooked session with what its hooks already said") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "claude-1", pid: 1, state: .working, isAlive: alwaysAlive)
+        registry.enrich(sessionID: "claude-1", supersetWorkspaceID: "ws-1", supersetTerminalID: "t-claude")
+        // Hooks decide Claude's done/working (they know about delegating subagents);
+        // a bus Stop must not paint done over a delegating session.
+        expectEqual(
+            registry.applyBus(change(.done, "t-claude", agent: "claude"), mayClaim: false, now: at(1), isAlive: alwaysAlive),
+            .ignored
+        )
+        expectEqual(registry.entry(forSession: "claude-1")?.state, .working)
+        // And an unknown Claude terminal is never claimed from the bus.
+        expectEqual(
+            registry.applyBus(change(.working, "t-unknown", agent: "claude"), mayClaim: false, now: at(1), isAlive: alwaysAlive),
+            .ignored
+        )
+        expectEqual(registry.entries.count, 1)
+    }
+
+    test("dedupe: the same Stop from our hook and from the bus counts once") {
+        var mapper = LifecycleMapper(startDebounce: 0.2, dedupeWindow: 1.5)
+        let hook = event(.stop, "t-claude", agent: "claude", at: at(0))
+        expectEqual(mapper.ingest(hook, from: .hook, now: at(0))?.state, .done)
+        expect(mapper.ingest(event(.stop, "t-claude", agent: "claude", at: at(0.4)), from: .bus, now: at(0.4)) == nil,
+               "the bus echo of the hook's Stop was applied again")
+        // Outside the window it is a new turn.
+        expectEqual(mapper.ingest(event(.stop, "t-claude", agent: "claude", at: at(3)), from: .bus, now: at(3))?.state, .done)
+        // And the hook's own event types map to lifecycle types the mapper knows.
+        expectEqual(LifecycleType.forHookState(.done), .stop)
+        expectEqual(LifecycleType.forHookState(.error), .failed)
+        expectEqual(LifecycleType.forHookState(.awaiting), .permissionRequest)
+        expectEqual(LifecycleType.forHookState(.working), .start)
+        expectEqual(LifecycleType.forHookState(.ended), .detached)
+        expect(LifecycleType.forHookState(.stalled) == nil)
+    }
+
+    test("a hook for a terminal the bus already put on the board takes over that key") {
+        var registry = SessionRegistry()
+        _ = registry.applyBus(change(.working, "t-x", agent: "claude"), mayClaim: true, now: at(0), isAlive: alwaysAlive)
+        let slot = try Harness.require(registry.entry(forTerminal: "t-x")?.slot)
+        expect(registry.promoteBusEntry(terminalID: "t-x", to: "claude-9"))
+        let entry = try Harness.require(registry.entry(forSession: "claude-9"))
+        expectEqual(entry.slot, slot)
+        expect(!entry.isBusBorn)
+        let again = registry.claim(sessionID: "claude-9", pid: 7, state: .working, now: at(1), isAlive: alwaysAlive)
+        expectEqual(again.mode, .kept)
+        expectEqual(registry.entries.count, 1)
+    }
+
+    test("the launch reconciliation confirms or ends what the file restored") {
+        var saved = SessionRegistry()
+        _ = saved.claim(sessionID: "a", pid: 1, state: .awaiting, now: at(0), isAlive: alwaysAlive)
+        _ = saved.claim(sessionID: "b", pid: 2, state: .working, now: at(0), isAlive: alwaysAlive)
+        // Through the store, the only way an entry comes back unconfirmed.
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("ob-registry-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        RegistryStore.save(saved, url: url)
+        var registry = RegistryStore.load(url: url, now: at(1), isAlive: alwaysAlive)
+        expect(registry.entries.allSatisfy(\.isUnconfirmed), "precondition: restored unconfirmed")
+        registry.apply(
+            [.confirm(sessionID: "a", state: .done), .end(sessionID: "b")],
+            now: at(10)
+        )
+        let a = try Harness.require(registry.entry(forSession: "a"))
+        expectEqual(a.state, .done, "Superset's word wins over the file, even awaiting → done")
+        expect(!a.isUnconfirmed)
+        expectEqual(a.stateSince, at(10))
+        expectEqual(registry.entry(forSession: "b")?.state, .ended)
+        expectEqual(registry.entry(forSession: "b")?.isUnconfirmed, false)
+    }
 }
 
 /**
@@ -741,16 +1018,180 @@ func runBoardRowTests() {
         expectEqual(flattened, BoardLayout.cells.map(\.id))
     }
 
-    test("the wide cap is the only one that spans") {
+    test("no cell spans on the clone") {
         let spanning = BoardLayout.cells.filter { $0.span > 1 }
-        expectEqual(spanning.map(\.id), ["ACT10"])
-        expectEqual(spanning.first?.span, 2)
-        // And it carries both switches, because one keycap reports two names.
-        expectEqual(spanning.first?.members, ["ACT10", "ACT11"])
+        expectEqual(spanning.map(\.id), [])
     }
 
-    test("the bottom row is the touch strip, the wide cap, and one more") {
+    test("the bottom row is the touch strip and three single keys") {
         let last = try Harness.require(BoardLayout.rows.last)
-        expectEqual(last.map(\.id), ["TOUCH", "ACT10", "ACT12"])
+        expectEqual(last.map(\.id), ["TOUCH", "ACT10", "ACT11", "ACT12"])
     }
+}
+
+/// A host-service that only records what it was asked. Nothing leaves the process.
+private actor RecordingHost: SupersetHostAPI {
+    var bindings: [AgentBinding]
+    var snapshotText: String? = "$ claude\n> working…"
+    private(set) var performed: [SupersetCall] = []
+    private(set) var snapshots: [(terminal: String, lines: Int)] = []
+
+    init(bindings: [AgentBinding]) { self.bindings = bindings }
+
+    var state: SupersetLinkState { .connected(version: "1.30.0", readOnly: false) }
+    func health() async throws -> String { "1.30.0" }
+    func agents(workspaceID: String?) async throws -> [AgentBinding] {
+        bindings.filter { workspaceID == nil || $0.workspaceID == workspaceID }
+    }
+    func snapshot(terminalID: String, workspaceID: String, maxLines: Int) async throws -> String {
+        snapshots.append((terminalID, maxLines))
+        guard let snapshotText else { throw SupersetClientError.unreachable }
+        return snapshotText
+    }
+    func transcript(terminalID: String, workspaceID: String, maxChars: Int) async throws -> String { "" }
+    func perform(_ call: SupersetCall) async throws { performed.append(call) }
+}
+
+/// Runs an async body to completion from the synchronous test harness.
+private func blocking<T: Sendable>(_ body: @escaping @Sendable () async -> T) -> T {
+    let done = DispatchSemaphore(value: 0)
+    let box = ResultBox<T>()
+    Task { box.value = await body(); done.signal() }
+    done.wait()
+    return box.value!
+}
+private final class ResultBox<T>: @unchecked Sendable { var value: T? }
+
+/**
+ Targeted control from the pad (F7, D10 armed mode): which key does what while armed,
+ and what reaches the host-service when it fires — through a recording fake.
+ */
+func targetedControlChecks() {
+    let t0 = Date(timeIntervalSince1970: 1_790_000_000)
+    func at(_ s: TimeInterval) -> Date { t0.addingTimeInterval(s) }
+    let taps: [String: KeyAction] = ["ACT06": .shortcut, "ACT07": .approve, "ACT08": .reject, "ACT09": .nextSession]
+    let limits = Preferences.Targeted()
+    func binding(_ type: LifecycleType?) -> AgentBinding {
+        AgentBinding(terminalID: "t-1", workspaceID: "ws-1", agent: "claude", lastEventType: type)
+    }
+
+    test("targeted: an agent key while armed fires at that agent and does not jump") {
+        var arming = TargetArming(window: 3, snippet: "sigue")
+        _ = arming.arm(now: t0)
+        let route = TargetedRun.route(.jump(slot: 2), arming: &arming, taps: taps, now: at(1))
+        expectEqual(route, .consumed(.fire(.send(text: "sigue"), padKey: 2)))
+        // Consumed means the controller never reaches its `.jump` case.
+        expect(route != .passThrough)
+        // Disarmed again: the next agent key jumps as always.
+        expectEqual(TargetedRun.route(.jump(slot: 2), arming: &arming, taps: taps, now: at(2)), .passThrough)
+    }
+
+    test("targeted: REJ while armed turns the send into an interrupt, then the agent key fires it") {
+        var arming = TargetArming(window: 3, snippet: "sigue")
+        _ = arming.arm(now: t0)
+        // REJ has a long press, so it arrives as a press to be timed.
+        expectEqual(TargetedRun.route(.actionPressed(key: "ACT08"), arming: &arming, taps: taps, now: at(0.5)),
+                    .consumed(.armed(.interrupt)))
+        expectEqual(TargetedRun.route(.action(.reject, key: "ACT08"), arming: &arming, taps: taps, now: at(0.6)),
+                    .consumed(.armed(.interrupt)))
+        expectEqual(TargetedRun.route(.jump(slot: 1), arming: &arming, taps: taps, now: at(1)),
+                    .consumed(.fire(.interrupt, padKey: 1)))
+    }
+
+    test("targeted: any other key cancels and does nothing else; releases and the dial pass") {
+        var arming = TargetArming(window: 3, snippet: "sigue")
+        _ = arming.arm(now: t0)
+        expectEqual(TargetedRun.route(.release(key: "ACT06"), arming: &arming, taps: taps, now: at(0.1)), .passThrough,
+                    "FAST's own release must not cancel what its hold armed")
+        expectEqual(TargetedRun.route(.scroll(lines: 3), arming: &arming, taps: taps, now: at(0.2)), .passThrough)
+        expectEqual(TargetedRun.route(.actionPressed(key: "ACT07"), arming: &arming, taps: taps, now: at(0.3)),
+                    .consumed(.cancelled))
+        // Not armed: everything keeps its meaning.
+        expectEqual(TargetedRun.route(.action(.reject, key: "ACT08"), arming: &arming, taps: taps, now: at(0.4)), .passThrough)
+        _ = arming.arm(now: at(1))
+        expectEqual(TargetedRun.route(.encoderPressed, arming: &arming, taps: taps, now: at(1.1)), .consumed(.cancelled))
+        // A key after the window cancels rather than fires.
+        _ = arming.arm(now: at(2))
+        expectEqual(TargetedRun.route(.jump(slot: 3), arming: &arming, taps: taps, now: at(6)), .consumed(.cancelled))
+    }
+
+    test("targeted: a send to a working agent is refused and nothing is written") {
+        let host = RecordingHost(bindings: [binding(.start)])
+        let report = blocking {
+            await TargetedRun.fire(.send(text: "sigue"), terminalID: "t-1", workspaceID: "ws-1", host: host, limits: limits)
+        }
+        expectEqual(report, .refused(reason: "agent has not stopped"))
+        expect(blocking { await host.performed }.isEmpty, "a refused send wrote to the terminal")
+        // The snapshot is still read first (Plan §6), and never returned.
+        expectEqual(blocking { await host.snapshots.map(\.lines) }, [limits.snapshotLines])
+    }
+
+    test("targeted: an interrupt sends ⎋ and then clears the status, in that order") {
+        let host = RecordingHost(bindings: [binding(.start)])
+        let report = blocking {
+            await TargetedRun.fire(.interrupt, terminalID: "t-1", workspaceID: "ws-1", host: host, limits: limits)
+        }
+        expectEqual(report, .done(procedures: [.terminalWriteInput, .clearWorkspaceStatuses], bytes: 0))
+        expectEqual(blocking { await host.performed }, [
+            .writeInput(terminalID: "t-1", workspaceID: "ws-1", data: .escape),
+            .clearStatuses(workspaceID: "ws-1", terminalID: "t-1"),
+        ])
+    }
+
+    test("targeted: a send to a stopped agent submits the snippet and reports only its size") {
+        let host = RecordingHost(bindings: [binding(.stop)])
+        let report = blocking {
+            await TargetedRun.fire(.send(text: "sigue"), terminalID: "t-1", workspaceID: "ws-1", host: host, limits: limits)
+        }
+        expectEqual(report, .done(procedures: [.terminalSend], bytes: 5))
+        expectEqual(blocking { await host.performed }, [.send(terminalID: "t-1", workspaceID: "ws-1", text: "sigue", submit: true)])
+        // What the log line is built from carries no text.
+        expect(!"\(report)".contains("sigue"))
+    }
+
+    test("targeted: neither the report nor the logged line carries the screen or the snippet") {
+        let screen = "SCREEN-7f3a secret on screen"
+        let snippet = "SNIPPET-91cc please continue"
+        for type in [LifecycleType.stop, .start] {
+            let host = RecordingHost(bindings: [binding(type)])
+            blocking { await host.setSnapshot(screen) }
+            for intent in [TargetedControl.Intent.send(text: snippet), .interrupt] {
+                let report = blocking {
+                    await TargetedRun.fire(intent, terminalID: "t-1", workspaceID: "ws-1", host: host, limits: limits)
+                }
+                let line = TargetedRun.logLine(report, intent: intent, label: "key 1 · ws")
+                for text in ["\(report)", String(reflecting: report), line] {
+                    expect(!text.contains("SCREEN-7f3a"), "screen text leaked: \(type) \(TargetedRun.logLine(report, intent: .interrupt, label: ""))")
+                    expect(!text.contains("SNIPPET-91cc"), "snippet leaked: \(type)")
+                }
+            }
+        }
+        // A failure partway reports procedures and a code, still no text.
+        let failing = TargetedRun.logLine(
+            .failed(after: [.terminalWriteInput], error: "readOnly"), intent: .send(text: snippet), label: "key 2"
+        )
+        expect(!failing.contains("SNIPPET-91cc"))
+        expectEqual(TargetedRun.logLine(.done(procedures: [.terminalSend], bytes: 12), intent: .send(text: snippet), label: "key 2"),
+                    "targeted: sent 12 bytes to key 2")
+    }
+
+    test("targeted: no snapshot, no binding or no terminal means nothing is written") {
+        let noSnapshot = RecordingHost(bindings: [binding(.start)])
+        blocking { await noSnapshot.setSnapshot(nil) }
+        expectEqual(
+            blocking { await TargetedRun.fire(.interrupt, terminalID: "t-1", workspaceID: "ws-1", host: noSnapshot, limits: limits) },
+            .refused(reason: "no snapshot taken first")
+        )
+        expect(blocking { await noSnapshot.performed }.isEmpty)
+        let unbound = RecordingHost(bindings: [])
+        expectEqual(
+            blocking { await TargetedRun.fire(.interrupt, terminalID: "t-1", workspaceID: "ws-1", host: unbound, limits: limits) },
+            .refused(reason: "no agent bound to that terminal")
+        )
+        expect(blocking { await unbound.performed }.isEmpty)
+    }
+}
+
+extension RecordingHost {
+    fileprivate func setSnapshot(_ text: String?) { snapshotText = text }
 }

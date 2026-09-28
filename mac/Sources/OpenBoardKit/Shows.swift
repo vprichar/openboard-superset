@@ -190,3 +190,111 @@ extension Duration {
         Double(components.seconds) + Double(components.attoseconds) / 1e18
     }
 }
+
+/**
+ The workspace transition's ring shows. Not in `all`: they are built per switch from the
+ workspace's color and the configured timings, and are not something to pick from the
+ Colors pane.
+ */
+extension Shows {
+    /**
+     One lap in the workspace's color, then the same curved fade the laps use.
+
+     One lap, not a slow one: a transition must never be mistaken for an event, and the
+     events are all slow laps (3–4s) or a heartbeat. Speed is a setting because the
+     speed-to-lap relation is extrapolated, not measured — see `ringSpeed`.
+     */
+    public static func workspaceSweep(
+        color: RGB, settings: Preferences.WorkspaceTransition
+    ) -> Show {
+        Show(
+            name: "workspace", label: "Workspace sweep",
+            description: "One lap in the workspace's color, then a fade.",
+            auto: true,
+            steps: [step(
+                color.value, .snake, settings.ringBrightness, settings.ringSpeed, settings.ringHoldMs
+            )]
+                + fadeOut(
+                    color.value, from: settings.ringBrightness,
+                    steps: settings.ringFadeSteps, ms: settings.ringFadeStepMs
+                )
+        )
+    }
+
+    /// The `cut` style's ring: a brief solid, then a short fade. No motion to follow,
+    /// just "something changed".
+    public static func workspaceCut(color: RGB) -> Show {
+        Show(
+            name: "workspace", label: "Workspace cut",
+            description: "A brief solid in the workspace's color, then a fade.",
+            auto: true,
+            steps: [step(color.value, .solid, 0.6, 0, 250)]
+                + fadeOut(color.value, from: 0.6, steps: 6, ms: 60)
+        )
+    }
+}
+
+/// Answers to a key press (F4, F5): built per use from the settings, not in `all`.
+extension Shows {
+    /// Amber, and not the awaiting orange: "that did nothing", not "someone is waiting".
+    public static let amber = RGB(0xFFB000)
+
+    /**
+     The two-step confirmation: the configured look for exactly the window, then dark.
+     Cut short by the controller the moment the pending action is confirmed, cancelled
+     or lapses — the ring must never keep asking after the question is gone.
+     */
+    public static func confirm(color: RGB, effect: LEDEffect, brightness: Double, milliseconds: Int) -> Show {
+        let device = CodexProtocol.Effect(rawValue: effect.deviceCode) ?? .breath
+        return Show(
+            name: "confirm", label: "Confirm",
+            description: "Are you sure? APPR confirms, any other key cancels.",
+            auto: true,
+            steps: [
+                step(color.value, device, brightness, 0.5, max(milliseconds - 80, 0)),
+                step(0x000000, .off, 0, 0, 80),
+            ]
+        )
+    }
+
+    /// NEW with no Superset workspace in front: two short solid amber pulses.
+    public static func noWorkspace() -> Show {
+        Show(
+            name: "no-workspace", label: "No workspace",
+            description: "NEW needs a Superset workspace in front.",
+            auto: true,
+            steps: [
+                step(amber.value, .solid, 0.8, 0, 180),
+                step(0x000000, .off, 0, 0, 120),
+                step(amber.value, .solid, 0.8, 0, 180),
+                step(0x000000, .off, 0, 0, 80),
+            ]
+        )
+    }
+}
+
+/// The armed mode of targeted control (F7, D10).
+extension Shows {
+    /**
+     Armed, waiting for an agent key: a lap around the ring for the whole window, so it
+     cannot be mistaken for the confirmation's breath. The caller picks the color — the
+     confirmation's for a send, the error state's once REJ turned it into an interrupt.
+     */
+    public static func targetArmed(color: RGB, brightness: Double, milliseconds: Int) -> Show {
+        Show(
+            name: "targeted", label: "Targeted",
+            description: "Armed: the next agent key receives it, without jumping.",
+            auto: true,
+            steps: [
+                step(color.value, .snake, brightness, 0.35, max(milliseconds - 80, 0)),
+                step(0x000000, .off, 0, 0, 80),
+            ]
+        )
+    }
+
+    /// A targeted send or interrupt that was refused or failed: the amber blink.
+    public static func refused() -> Show {
+        let blink = noWorkspace()
+        return Show(name: "refused", label: "Refused", description: "Nothing was sent.", auto: true, steps: blink.steps)
+    }
+}

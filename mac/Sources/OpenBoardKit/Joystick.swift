@@ -116,15 +116,11 @@ extension Joystick {
     /// Parse a `v.oai.rad` line. Returns nil for anything else, including the
     /// `v.oai.hid` keypresses that share the stream.
     public static func parse(_ data: Data) -> (angle: Double, deflection: Double)? {
-        struct Envelope: Decodable {
-            struct Payload: Decodable {
-                let a: Double
-                let d: Double
-            }
-            let m: String
-            let p: Payload
+        struct Payload: Decodable {
+            let a: Double
+            let d: Double
         }
-        guard let envelope = try? JSONDecoder().decode(Envelope.self, from: data),
+        guard let envelope = try? JSONDecoder().decode(NotificationEnvelope<Payload>.self, from: data),
               envelope.m == "v.oai.rad"
         else { return nil }
         return (envelope.p.a, envelope.p.d)

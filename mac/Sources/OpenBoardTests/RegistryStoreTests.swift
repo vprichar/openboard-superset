@@ -52,6 +52,34 @@ func runRegistryStoreTests() {
         }
     }
 
+    test("a Superset session keeps its workspace across a restart") {
+        // The workspace id is what the Agent key deep-links to; losing it on relaunch
+        // would send the jump down the tty walk, which cannot reach Superset.
+        let event = HookServer.Event(raw: [
+            "hook_event_name": "SessionStart",
+            "session_id": "s-superset",
+            "env": ["SUPERSET_WORKSPACE_ID": "ws-1", "SUPERSET_TERMINAL_ID": "term-1"],
+        ])
+        expectEqual(event.supersetWorkspaceID, "ws-1")
+        expectEqual(event.supersetTerminalID, "term-1")
+        expect(HookServer.Event(raw: ["env": ["SUPERSET_WORKSPACE_ID": ""]])
+            .supersetWorkspaceID == nil, "an empty id is not a workspace")
+
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let now = Date()
+        var registry = board(now: now, states: [(1, .idle)])
+        expect(registry.enrich(
+            sessionID: "session-1",
+            supersetWorkspaceID: event.supersetWorkspaceID,
+            supersetTerminalID: event.supersetTerminalID
+        ))
+        RegistryStore.save(registry, url: url)
+        let loaded = RegistryStore.load(url: url, now: now, isAlive: { _ in true })
+        expectEqual(loaded.entry(forSession: "session-1")?.supersetWorkspaceID, "ws-1")
+        expectEqual(loaded.entry(forSession: "session-1")?.supersetTerminalID, "term-1")
+    }
+
     test("a dead process does not come back") {
         let url = tempURL()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -181,6 +209,51 @@ func runRegistryStoreTests() {
         expectEqual(loaded.entries.first?.sessionID, "b")
     }
 
+    test("the board order survives a restart") {
+        // Otherwise a relaunch re-sorts the pad by slot and every inherited `/clear`
+        // order is lost.
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let now = Date()
+        var registry = board(now: now, states: [(1, .idle), (2, .idle)])
+        registry.release(sessionID: "session-1")
+        _ = registry.claim(sessionID: "late", pid: 2000, now: now, isAlive: { _ in true })
+        let late = try Harness.require(registry.entry(forSession: "late"))
+        expectEqual(late.slot, 1)
+        RegistryStore.save(registry, url: url)
+
+        let loaded = RegistryStore.load(url: url, now: now, isAlive: { _ in true })
+        expectEqual(loaded.entry(forSession: "late")?.boardOrder, late.boardOrder)
+        let order = loaded.entries.sorted { $0.boardOrder < $1.boardOrder }.map(\.sessionID)
+        expectEqual(order, ["session-2", "late"])
+    }
+
+    test("a registry.json without boardOrder loads ordered by claimSeq") {
+        // Written by a build before the field existed. Claim order is the closest
+        // thing it recorded to "the order these appeared", and it is not the slot.
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let json = """
+        {"version":1,"cursor":5,"entries":[
+          {"slot":1,"sessionID":"newer","state":"idle","claimSeq":5,
+           "claimedAt":"2026-07-30T12:00:00Z","updatedAt":"2026-07-30T12:00:00Z"},
+          {"slot":2,"sessionID":"older","state":"idle","claimSeq":3,
+           "claimedAt":"2026-07-30T12:00:00Z","updatedAt":"2026-07-30T12:00:00Z"}]}
+        """
+        try Data(json.utf8).write(to: url)
+
+        let loaded = RegistryStore.load(
+            url: url,
+            staleInterval: .greatestFiniteMagnitude,
+            now: Date(timeIntervalSince1970: 1_785_000_000),
+            isAlive: { _ in true }
+        )
+        expectEqual(loaded.entry(forSession: "newer")?.boardOrder, 5)
+        expectEqual(loaded.entry(forSession: "older")?.boardOrder, 3)
+        let order = loaded.entries.sorted { $0.boardOrder < $1.boardOrder }.map(\.sessionID)
+        expectEqual(order, ["older", "newer"])
+    }
+
     test("the file is not world-readable") {
         let url = tempURL()
         defer { try? FileManager.default.removeItem(at: url) }
@@ -189,6 +262,89 @@ func runRegistryStoreTests() {
         let mode = (try? FileManager.default.attributesOfItem(atPath: url.path))
             .flatMap { $0[.posixPermissions] as? NSNumber }?.intValue ?? 0
         expectEqual(mode & 0o077, 0)
+    }
+
+    test("a restored attention or working entry comes back unconfirmed") {
+        // The file says what was true when the app closed. Until a hook (or the
+        // Superset reconciliation) says it still is, the pad must not paint it as fact.
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let now = Date()
+        RegistryStore.save(
+            board(now: now, states: [(1, .awaiting), (2, .working), (3, .stalled), (4, .done), (5, .idle)]),
+            url: url
+        )
+        let loaded = RegistryStore.load(url: url, now: now, isAlive: { _ in true })
+        for id in ["session-1", "session-2", "session-3"] {
+            expectEqual(loaded.entry(forSession: id)?.isUnconfirmed, true, "\(id) came back as fact")
+        }
+        expectEqual(loaded.entry(forSession: "session-1")?.state, .awaiting,
+                    "the claim is kept, only flagged")
+        expectEqual(loaded.entry(forSession: "session-4")?.state, .done)
+        expectEqual(loaded.entry(forSession: "session-4")?.isUnconfirmed, false,
+                    "an unseen completion is not in doubt")
+        expectEqual(loaded.entry(forSession: "session-5")?.isUnconfirmed, false)
+    }
+
+    test("a session whose Superset terminal is gone comes back ended") {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let now = Date()
+        var registry = board(now: now, states: [(1, .awaiting), (2, .awaiting), (3, .done), (4, .working)])
+        for (id, terminal) in [("session-1", "t-disposed"), ("session-2", "t-active"),
+                               ("session-3", "t-ended"), ("session-4", "t-unknown")] {
+            registry.enrich(sessionID: id, supersetWorkspaceID: "ws", supersetTerminalID: terminal)
+        }
+        RegistryStore.save(registry, url: url)
+
+        let table: [String: TerminalLiveness] = [
+            "t-disposed": .disposed, "t-active": .active, "t-ended": .ended,
+        ]
+        let loaded = RegistryStore.load(
+            url: url, now: now, isAlive: { _ in true }, liveness: { table[$0] }
+        )
+        expectEqual(loaded.entry(forSession: "session-1")?.state, .ended, "disposed terminal")
+        expectEqual(loaded.entry(forSession: "session-1")?.isUnconfirmed, false,
+                    "an ended session is not waiting on a confirmation")
+        expectEqual(loaded.entry(forSession: "session-3")?.state, .ended, "ended_at set")
+        expectEqual(loaded.entry(forSession: "session-2")?.state, .awaiting)
+        expectEqual(loaded.entry(forSession: "session-2")?.isUnconfirmed, true,
+                    "an active terminal does not confirm the state, only the session")
+        expectEqual(loaded.entry(forSession: "session-4")?.isUnconfirmed, true,
+                    "a terminal Superset does not know is no evidence either way")
+        expect(loaded.entry(forSession: "session-4")?.state != .ended)
+    }
+
+    test("stateSince survives a restart") {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let claimed = Date(timeIntervalSince1970: 1_790_000_000)
+        var registry = board(now: claimed, states: [(1, .working)])
+        let changed = claimed.addingTimeInterval(42)
+        registry.setState(sessionID: "session-1", to: .awaiting, now: changed)
+        RegistryStore.save(registry, url: url)
+
+        let loaded = RegistryStore.load(
+            url: url, now: changed.addingTimeInterval(60), isAlive: { _ in true }
+        )
+        expectEqual(loaded.entry(forSession: "session-1")?.stateSince, changed)
+    }
+
+    test("a registry.json without stateSince falls back to updatedAt") {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        let json = """
+        {"version":1,"cursor":1,"entries":[
+          {"slot":1,"sessionID":"old","state":"done","claimSeq":1,
+           "claimedAt":"2026-07-30T12:00:00Z","updatedAt":"2026-07-30T12:05:00Z"}]}
+        """
+        try Data(json.utf8).write(to: url)
+        let loaded = RegistryStore.load(
+            url: url, staleInterval: .greatestFiniteMagnitude,
+            now: Date(timeIntervalSince1970: 1_785_000_000), isAlive: { _ in true }
+        )
+        expectEqual(loaded.entry(forSession: "old")?.stateSince,
+                    ISO8601DateFormatter().date(from: "2026-07-30T12:05:00Z"))
     }
 
     test("it lives beside the other state, under OPENBOARD_HOME") {

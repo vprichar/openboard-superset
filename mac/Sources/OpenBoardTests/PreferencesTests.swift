@@ -12,6 +12,21 @@ import OpenBoardKit
  different path or schema would have ignored every setting in it.
  */
 func runPreferencesTests() {
+    test("preferences: customThemes default to none, and survive a save and load") {
+        expect(Preferences.default.customThemes.isEmpty)
+        expect(Preferences.merging([:]).customThemes.isEmpty, "absent means []")
+        var p = Preferences.default
+        let mine = CustomTheme(from: .claude, id: "custom-1", name: "Mío")
+        p.customThemes = [mine]
+        let data = try! JSONSerialization.data(withJSONObject: p.json)
+        let json = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+        expectEqual(Preferences.merging(json).customThemes, [mine])
+        // A broken entry is dropped; the good one survives.
+        var raw = json
+        raw["customThemes"] = [["id": "custom-x", "name": "roto"]] + (json["customThemes"] as! [Any])
+        expectEqual(Preferences.merging(raw).customThemes, [mine])
+    }
+
     func tempURL() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("ob-config-\(UUID().uuidString).json")
@@ -27,7 +42,7 @@ func runPreferencesTests() {
         for state in SessionState.allCases {
             expectEqual(defaults.appearance(for: state), state.defaultAppearance)
         }
-        expectEqual(defaults.keyActions["ACT06"], .approve)
+        expectEqual(defaults.keyActions["ACT06"], .shortcut)
         expectEqual(defaults.notificationStates["permission_prompt"], .awaiting)
         // Means "sitting idle", not "needs you" — mapping it lights the attention
         // color with nothing to act on.
@@ -224,6 +239,7 @@ func runPreferencesTests() {
         prefs.doneDecaySeconds = 120
         prefs.holdAttention = false
         prefs.maxHoldSeconds = 45
+        prefs.padScope = .all
 
         expect(prefs != Preferences.default, "the fixture never left the defaults")
 
@@ -233,6 +249,24 @@ func runPreferencesTests() {
         let reloaded = PreferencesStore().load(url: url)
 
         expectEqual(reloaded, prefs)
+    }
+
+    test("the pad follows the focused workspace by default") {
+        // The point of the feature; `all` is the way back to the old board.
+        expectEqual(Preferences.default.padScope, .focusedWorkspace)
+        expectEqual(Preferences.merging([:]).padScope, .focusedWorkspace)
+        // An unknown value is ignored rather than silently meaning "all".
+        expectEqual(Preferences.merging(["padScope": "sideways"]).padScope, .focusedWorkspace)
+    }
+
+    test("the pad scope survives a save and reload") {
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        var prefs = Preferences.default
+        prefs.padScope = .all
+        PreferencesStore().save(prefs, url: url, immediately: true)
+        expectEqual(PreferencesStore().load(url: url).padScope, .all)
+        expectEqual(prefs.json["padScope"] as? String, "all")
     }
 
     test("the file is written on first load, and is not world-readable") {
@@ -371,6 +405,297 @@ func runPreferencesTests() {
         expect(RGB(hex: "#7B2FF") == nil)
         expect(RGB(hex: "purple") == nil)
         expect(RGB(hex: "") == nil)
+    }
+
+    // MARK: - Superset groups (Plan §2.5/§2.6)
+
+    test("superset/profiles/actionKeysLong/confirm/targeted/launch survive a json round-trip") {
+        /*
+         Every new field moved off its default, written, reloaded, compared whole — the
+         same shape as "every single setting survives", for the groups that test predates.
+         A group missing from `json` or from `merging` is a control that forgets.
+        */
+        var prefs = Preferences.default
+
+        prefs.superset.hostClient = .off
+        prefs.superset.orgID = "55555555-test"
+        prefs.superset.testedVersion = "1.31.0"
+        prefs.superset.onVersionMismatch = .full
+        prefs.superset.events = false
+        prefs.superset.startDebounceMs = 350
+        prefs.superset.dedupeWindowMs = 900
+        prefs.superset.padWriteCoalesceMs = 120
+        prefs.superset.reconcileOnLaunch = false
+
+        prefs.profiles["com.superset.desktop"]?.joystick[.up] = .arrowUp
+        prefs.profiles["com.superset.desktop"]?.joystick[.left] = KeyAction?.none
+        prefs.profiles["com.superset.desktop"]?.encoderLongPress = KeyAction??.some(nil)
+        prefs.profiles["com.googlecode.iterm2"] = Preferences.AppProfile(
+            joystick: [.down: .nextSession],
+            encoderLongPress: .some(.popover),
+            actionKeysLong: ["ACT09": .prevSession, "ACT10": KeyAction?.none]
+        )
+
+        prefs.actionKeysLong["ACT07"] = KeyAction?.none
+        prefs.actionKeysLong["ACT10"] = .countdown
+        prefs.actionLongPressMs = 700
+
+        prefs.confirm.windowMs = 4500
+        prefs.confirm.color = RGB(0x33AA77)
+        prefs.confirm.effect = .shallowBreath
+        prefs.confirm.brightness = 0.55
+
+        prefs.targeted.mode = .chord
+        prefs.targeted.windowMs = 2500
+        prefs.targeted.snapshotLines = 40
+        prefs.targeted.maxSendBytes = 2048
+        prefs.targeted.defaultSnippet = "continue"
+        prefs.targeted.snippets = ["AG+ACT06": "sigue", "review": "/review"]
+
+        prefs.launch.newAgent = "3f1c2a9e-preset"
+        prefs.launch.handoffAgent = "claude"
+        prefs.launch.handoffContextChars = 8000
+        prefs.launch.createCooldownMs = 3500
+
+        prefs.snippetsAllowDangerous = true
+
+        expect(prefs != Preferences.default, "the fixture never left the defaults")
+
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        PreferencesStore().save(prefs, url: url, immediately: true)
+        let reloaded = PreferencesStore().load(url: url)
+
+        expectEqual(reloaded.superset, prefs.superset)
+        expectEqual(reloaded.profiles, prefs.profiles)
+        expectEqual(reloaded.actionKeysLong, prefs.actionKeysLong)
+        expectEqual(reloaded.confirm, prefs.confirm)
+        expectEqual(reloaded.targeted, prefs.targeted)
+        expectEqual(reloaded.launch, prefs.launch)
+        expectEqual(reloaded, prefs)
+    }
+
+    test("an optional left unset survives as unset, not as a value") {
+        // `orgId: null` means "the only org on disk", and `handoffContextChars: null`
+        // means "not verified yet" — neither may come back as an empty string or a 0.
+        var prefs = Preferences.default
+        prefs.superset.orgID = nil
+        prefs.launch.handoffContextChars = nil
+        let json = prefs.json
+        expect((json["superset"] as? [String: Any])?["orgId"] is NSNull, "orgId must be written as null")
+        let reloaded = Preferences.merging(json)
+        expect(reloaded.superset.orgID == nil)
+        expect(reloaded.launch.handoffContextChars == nil)
+    }
+
+    test("a removed built-in profile stays removed") {
+        // The Superset profile ships as a default. Without a tombstone, deleting it in
+        // the settings window would last exactly until the next launch.
+        var prefs = Preferences.default
+        prefs.profiles["com.superset.desktop"] = nil
+        prefs.shortcuts["JOY.up@com.superset.desktop"] = nil
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        PreferencesStore().save(prefs, url: url, immediately: true)
+        let reloaded = PreferencesStore().load(url: url)
+        expect(reloaded.profiles["com.superset.desktop"] == nil, "profile came back")
+        expect(reloaded.shortcuts["JOY.up@com.superset.desktop"] == nil, "shortcut came back")
+        expectEqual(reloaded, prefs)
+    }
+
+    test("states.unconfirmed survives a save") {
+        // D11: not a SessionState case, but its look lives beside the others. The
+        // reader drops unknown state names, so this is the one it must not drop.
+        var prefs = Preferences.default
+        prefs.states["unconfirmed"] = Appearance(
+            color: RGB(0x445566), effect: .breath, brightness: 0.25, speed: 0.1
+        )
+        let url = tempURL()
+        defer { try? FileManager.default.removeItem(at: url) }
+        PreferencesStore().save(prefs, url: url, immediately: true)
+        let reloaded = PreferencesStore().load(url: url)
+        expectEqual(reloaded.states["unconfirmed"], prefs.states["unconfirmed"])
+        expectEqual(reloaded.unconfirmedAppearance, prefs.states["unconfirmed"])
+        // A partial override merges like any state: only the effect changes.
+        let partial = Preferences.merging(["states": ["unconfirmed": ["effect": "breath"]]])
+        expectEqual(partial.unconfirmedAppearance.effect, .breath)
+        expectEqual(partial.unconfirmedAppearance.color, RGB(0x2E4A6B))
+        // Still no room for invented states.
+        expect(Preferences.merging(["states": ["bogus": ["effect": "breath"]]]).states["bogus"] == nil)
+    }
+
+    test("a profile for an unknown bundle is kept verbatim") {
+        // No list of known apps: whatever bundle id the document names is a profile,
+        // with its explicit nulls intact.
+        let document: [String: Any] = [
+            "profiles": [
+                "org.example.NeverHeardOf": [
+                    "joystick": ["up": "next-session", "right": NSNull()],
+                    "encoder": ["longPress": NSNull()],
+                    "actionKeysLong": ["ACT09": "shortcut", "ACT11": NSNull()],
+                ],
+            ],
+        ]
+        let prefs = Preferences.merging(document)
+        let profile = try Harness.require(prefs.profiles["org.example.NeverHeardOf"])
+        expectEqual(profile.joystick[.up], .some(.nextSession))
+        expect(profile.joystick[.right] == .some(nil), "explicit null became inherit")
+        expect(profile.joystick[.down] == nil, "absent became a value")
+        expect(profile.encoderLongPress == .some(nil), "explicit null encoder became inherit")
+        expectEqual(profile.actionKeysLong["ACT09"], .some(.shortcut))
+        expect(profile.actionKeysLong["ACT11"] == .some(nil))
+
+        let written = try Harness.require(
+            (prefs.json["profiles"] as? [String: Any])?["org.example.NeverHeardOf"] as? [String: Any]
+        )
+        let stick = try Harness.require(written["joystick"] as? [String: Any])
+        expectEqual(stick["up"] as? String, "next-session")
+        expect(stick["right"] is NSNull)
+        expect(stick["down"] == nil, "an inherited direction must stay absent")
+        expectEqual(Preferences.merging(prefs.json).profiles, prefs.profiles)
+    }
+
+    test("defaults equal Plan §2.5/§2.6") {
+        let d = Preferences.default
+
+        // superset
+        expectEqual(d.superset.hostClient, .auto)
+        expect(d.superset.orgID == nil)
+        expectEqual(d.superset.testedVersion, "1.30.0")
+        expectEqual(d.superset.onVersionMismatch, .readOnly)          // D8
+        expectEqual(d.superset.onVersionMismatch.rawValue, "read-only")
+        expectEqual(d.superset.events, true)
+        expectEqual(d.superset.startDebounceMs, 200)
+        expectEqual(d.superset.dedupeWindowMs, 1500)
+        expectEqual(d.superset.padWriteCoalesceMs, 90)
+        expectEqual(d.superset.reconcileOnLaunch, true)
+
+        // actionKeysLong + threshold (D7: APPR held = jump to the oldest waiting)
+        expectEqual(d.actionLongPressMs, 500)
+        expectEqual(d.actionKeysLong["ACT07"], .some(.jumpOldestWaiting))
+        expectEqual(d.actionKeysLong["ACT08"], .some(.interruptFocused))
+        expectEqual(d.actionKeysLong["ACT09"], .some(.shortcut))
+        expectEqual(d.actionKeysLong["ACT11"], .some(.shortcut))
+        // D4/D10: FAST held arms the targeted mode.
+        expectEqual(d.actionKeysLong["ACT06"], .some(.targetedArm))
+        // F8: CODEX held hands the focused terminal off to Codex; its tap is ⎋×2.
+        expectEqual(d.actionKeysLong["ACT12"], .some(.supersetHandoff))
+        expectEqual(d.actionKeysLong.count, 6)
+
+        // D1: NEW and CODEX ship unassigned; `enter` is still offered, just not bound.
+        expect(d.actionKeys["ACT11"] == .some(nil), "ACT11 must be explicitly unassigned")
+        expect(d.actionKeys["ACT12"] == .some(nil), "ACT12 must be explicitly unassigned")
+        expect(!d.keyActions.values.contains(.enter), "enter bound by default")
+        expect(KeyAction.allCases.contains(.enter))
+
+        // The Superset profile, and its chords under `@bundle`.
+        let superset = try Harness.require(d.profiles["com.superset.desktop"])
+        for direction in Joystick.Direction.allCases {
+            expectEqual(superset.joystick[direction], .some(.shortcut), direction.rawValue)
+        }
+        expect(superset.encoderLongPress == .some(.shortcut))
+        expectEqual(d.profiles.count, 1)
+        let chords: [(String, Int, Set<Shortcut.Modifier>)] = [
+            ("JOY.up@com.superset.desktop", 126, [.command, .option]),
+            ("JOY.down@com.superset.desktop", 125, [.command, .option]),
+            ("JOY.left@com.superset.desktop", 123, [.command, .option]),
+            ("JOY.right@com.superset.desktop", 124, [.command, .option]),
+            ("ENC.long@com.superset.desktop", 40, [.command, .shift]),
+            ("ACT09.long@com.superset.desktop", 37, [.command, .shift]),
+            ("ACT11.long@com.superset.desktop", 45, [.command, .shift]),
+        ]
+        for (key, code, modifiers) in chords {
+            let chord = try Harness.require(d.shortcuts[key], "missing \(key)")
+            expectEqual(chord.keyCode, code, key)
+            expectEqual(chord.modifiers, modifiers, key)
+            expectEqual(chord.mode, .tap, key)
+        }
+
+        // confirm (D3: white, breathing)
+        expectEqual(d.confirm.windowMs, 3000)
+        expectEqual(d.confirm.color, RGB(0xFFFFFF))
+        expectEqual(d.confirm.effect, .breath)
+        expectEqual(d.confirm.brightness, 0.8)
+
+        // targeted (D10: armed)
+        expectEqual(d.targeted.mode, .armed)
+        expectEqual(d.targeted.snapshotLines, 20)
+        expectEqual(d.targeted.requireStopForSend, true)
+        expectEqual(d.targeted.maxSendBytes, 4096)
+        expectEqual(d.targeted.defaultSnippet, "sigue")
+        expectEqual(d.targeted.snippets, [:])
+
+        // launch (D2: debounce only)
+        expectEqual(d.launch.newAgent, "claude")
+        expectEqual(d.launch.handoffAgent, "codex")
+        expect(d.launch.handoffContextChars == nil, "unverified, so unset")
+        expectEqual(d.launch.createCooldownMs, 2000)
+
+        // states.unconfirmed (Plan §2.4)
+        expectEqual(
+            d.states["unconfirmed"],
+            Appearance(color: RGB(0x2E4A6B), effect: .solid, brightness: 0.3, speed: 0)
+        )
+
+        // An empty document is the defaults, so a first launch writes exactly these.
+        expectEqual(Preferences.merging([:]), d)
+    }
+
+    test("default taps are the clone's layout (FAST APPR REJ BRANCH MIC NEW CODEX)") {
+        let d = Preferences.default
+        expectEqual(d.actionKeys["ACT06"], .some(.shortcut))
+        expectEqual(d.actionKeys["ACT07"], .some(.approve))
+        expectEqual(d.actionKeys["ACT08"], .some(.reject))
+        expectEqual(d.actionKeys["ACT09"], .some(.nextSession))
+        expectEqual(d.actionKeys["ACT10"], .some(.voiceTalk))
+        expect(d.actionKeys["ACT11"] == .some(nil), "NEW ships unassigned")
+        expect(d.actionKeys["ACT12"] == .some(nil), "CODEX ships unassigned")
+        // FAST is ⇧⇥, a tap: Claude Code's permission-mode toggle.
+        let fast = try Harness.require(d.shortcuts["ACT06"], "FAST has no chord")
+        expectEqual(fast.keyCode, 48)
+        expectEqual(fast.modifiers, [.shift])
+        expectEqual(fast.mode, .tap)
+        // No snippet is typed by any default key, so none ships.
+        expect(!d.keyActions.values.contains(.snippet), "a snippet key by default")
+        expect(d.snippets.isEmpty, "a default snippet with no key to type it")
+        // What the first launch writes is exactly this.
+        expectEqual(Preferences.merging([:]).actionKeys, d.actionKeys)
+    }
+
+    test("the long press of APPR and REJ sits on the cap whose tap is approve / reject") {
+        // The long bindings were written for the clone's caps. If the taps drift back
+        // to the upstream layout, "hold APPR" lands on a cap that rejects.
+        let d = Preferences.default
+        let approveCap = try Harness.require(d.keyActions.first { $0.value == .approve }?.key)
+        let rejectCap = try Harness.require(d.keyActions.first { $0.value == .reject }?.key)
+        expectEqual(d.actionKeysLong[approveCap], .some(.jumpOldestWaiting))
+        expectEqual(d.actionKeysLong[rejectCap], .some(.interruptFocused))
+        let fastCap = try Harness.require(d.shortcuts["ACT06"] != nil ? "ACT06" : nil)
+        expectEqual(d.actionKeys[fastCap], .some(.shortcut))
+        expectEqual(d.actionKeysLong[fastCap], .some(.targetedArm))
+    }
+
+    test("a chord's repeat survives the whole config round trip") {
+        var prefs = Preferences.default
+        prefs.shortcuts["ACT12"] = Shortcut(keyCode: 53, key: "⎋", mode: .tap, repeats: 2)
+        let data = try JSONSerialization.data(withJSONObject: prefs.json)
+        let json = try Harness.require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let reloaded = Preferences.merging(json)
+        expectEqual(reloaded.shortcuts["ACT12"]?.repeats, 2)
+        // Written as `repeat`, the name the user's config uses.
+        let stored = try Harness.require((json["shortcuts"] as? [String: Any])?["ACT12"] as? [String: Any])
+        expectEqual(stored["repeat"] as? Int, 2)
+        // A hand-edited `"repeat": 2` in config.json is read.
+        let hand = Preferences.merging(["shortcuts": ["ACT12": ["keyCode": 53, "key": "⎋", "mode": "tap", "repeat": 2]]])
+        expectEqual(hand.shortcuts["ACT12"]?.repeats, 2)
+    }
+
+    test("snippetsAllowDangerous defaults to false") {
+        expectEqual(Preferences.default.snippetsAllowDangerous, false)
+        expectEqual(Preferences.merging([:]).snippetsAllowDangerous, false)
+        // Only a real boolean turns it on — a string "true" typed by hand does not.
+        expectEqual(Preferences.merging(["snippetsAllowDangerous": "true"]).snippetsAllowDangerous, false)
+        expectEqual(Preferences.merging(["snippetsAllowDangerous": true]).snippetsAllowDangerous, true)
     }
 }
 

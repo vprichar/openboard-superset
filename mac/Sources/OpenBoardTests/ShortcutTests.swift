@@ -59,4 +59,44 @@ func runShortcutTests() {
         expect(KeyAction.forJoystick.contains(.enter))
         expect(KeyAction.forJoystick.contains(.shortcut))
     }
+
+    // MARK: - repeat (⎋⎋ from one press)
+
+    test("repeat: absent reads as once, and once is not written back") {
+        let esc = try Harness.require(Shortcut(json: ["keyCode": 53, "key": "⎋", "mode": "tap"]))
+        expectEqual(esc.repeats, 1)
+        expect(esc.json["repeat"] == nil, "a default of 1 must not be written into every chord")
+        expectEqual(Shortcut(json: esc.json), esc)
+    }
+
+    test("repeat: a stored count round-trips") {
+        let twice = try Harness.require(Shortcut(json: ["keyCode": 53, "key": "⎋", "mode": "tap", "repeat": 2]))
+        expectEqual(twice.repeats, 2)
+        expectEqual(twice.json["repeat"] as? Int, 2)
+        expectEqual(Shortcut(json: twice.json), twice)
+        expect(twice != Shortcut(keyCode: 53, key: "⎋"), "the count is part of the chord")
+    }
+
+    test("repeat: clamped to 1…5, and anything that is not a number is once") {
+        func count(_ raw: Any) -> Int? { Shortcut(json: ["keyCode": 53, "key": "⎋", "repeat": raw])?.repeats }
+        expectEqual(count(0), 1)
+        expectEqual(count(-3), 1)
+        expectEqual(count(9), 5)
+        expectEqual(count(5), 5)
+        expectEqual(count("2"), 1)
+        expectEqual(count(2.7), 1)
+        expectEqual(Shortcut(keyCode: 53, key: "⎋", repeats: 12).repeats, 5)
+        expectEqual(Shortcut(keyCode: 53, key: "⎋", repeats: 0).repeats, 1)
+    }
+
+    test("repeat: a tap is sent N times in order, a fixed short gap apart; a hold once") {
+        let twice = Shortcut(keyCode: 53, key: "⎋", mode: .tap, repeats: 2)
+        expectEqual(twice.sendDelays, [0, Shortcut.repeatGap])
+        expectEqual(Shortcut(keyCode: 53, key: "⎋", repeats: 3).sendDelays, [0, Shortcut.repeatGap, Shortcut.repeatGap])
+        expectEqual(Shortcut(keyCode: 53, key: "⎋").sendDelays, [0])
+        // A held chord stays down until release; repeating it means nothing.
+        expectEqual(Shortcut(keyCode: 49, key: "Space", mode: .hold, repeats: 3).sendDelays, [0])
+        // Short enough to read as one gesture, long enough for the TUI to see two keys.
+        expect(Shortcut.repeatGap >= 0.03 && Shortcut.repeatGap <= 0.1)
+    }
 }

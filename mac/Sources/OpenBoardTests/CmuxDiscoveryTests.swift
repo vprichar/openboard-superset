@@ -180,9 +180,9 @@ func runCmuxNewTabTests() {
         expectEqual(KeyAction.newWorkspaceCmux.rawValue, "newworkspace-cmux")
         // The labels have to name the app, or three "new tab" entries in one picker are
         // indistinguishable.
-        expectEqual(KeyAction.newtabCmux.short, "new cmux tab")
-        expectEqual(KeyAction.newWorkspaceCmux.short, "new cmux workspace")
-        expectEqual(KeyAction.newtab.short, "new Terminal tab")
+        expectEqual(KeyAction.newtabCmux.short, "nueva pestaña de cmux")
+        expectEqual(KeyAction.newWorkspaceCmux.short, "nuevo espacio de trabajo de cmux")
+        expectEqual(KeyAction.newtab.short, "nueva pestaña de Terminal")
     }
 
     test("a binding survives the config round trip") {

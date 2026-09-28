@@ -152,24 +152,21 @@ test("a subagent of an embedded SDK client reports as a subagent") {
 // MARK: - Board layout
 
 test("the board is the pad, in reading order") {
-    expect(BoardLayout.cells.count == 15, "13 keys with ACT10+ACT11 merged, plus 3 elements")
+    expect(BoardLayout.cells.count == 16, "13 keys, ACT10 and ACT11 separate, plus 3 elements")
     expect(BoardLayout.cells.filter(\.isAgent).count == 6)
-    expect(BoardLayout.cells.filter(\.isAction).count == 6)
+    expect(BoardLayout.cells.filter(\.isAction).count == 7)
     expect(BoardLayout.agentKeys == ["AG00", "AG01", "AG02", "AG03", "AG04", "AG05"])
 }
 
-test("the wide cap is one key, not two") {
-    // ACT10 and ACT11 are two switches under one keycap and report a few ms apart.
-    // Untreated this fired two actions per press — and when one held a key down,
-    // the other typed into it.
-    expect(BoardLayout.canonical("ACT11") == "ACT10")
+test("the clone's ACT10 and ACT11 are two keys, not one wide cap") {
+    // The clone has separate mic and pencil caps where the genuine pad has one.
+    expect(BoardLayout.canonical("ACT11") == "ACT11")
     expect(BoardLayout.canonical("ACT10") == "ACT10")
     expect(BoardLayout.canonical("ACT12") == "ACT12")
 
-    let wide = BoardLayout.cell(id: "ACT10")
-    expect(wide?.span == 2)
-    expect(wide?.members == ["ACT10", "ACT11"])
-    expect(BoardLayout.cell(id: "ACT11") == nil, "ACT11 has no cell of its own")
+    expect(BoardLayout.cell(id: "ACT10")?.span == 1)
+    expect(BoardLayout.cell(id: "ACT10")?.members == ["ACT10"])
+    expect(BoardLayout.cell(id: "ACT11")?.isAction == true, "ACT11 has its own cell")
 }
 
 test("slots and keys map both ways") {
@@ -193,7 +190,7 @@ test("the dial, stick and touch sensor never take a keycap") {
 
 test("reject carries both of its meanings") {
     // It rejects a pending prompt *and* cancels fun mode. The label has to say so.
-    expect(KeyAction.reject.long.contains("fun mode"))
+    expect(KeyAction.reject.long.contains("modo diversión"))
     expect(KeyAction.approve.hint == "⏎")
     expect(KeyAction.reject.hint == "⎋")
     expect(KeyAction.sync.hint == nil)

@@ -50,11 +50,95 @@ final class BoardController: ObservableObject {
     /// board asks of cmux — what a session's surface is, and what that surface is
     /// called — so they cannot disagree with each other.
     private var cmuxSurfaces: [Int: Cmux.Surface] = [:]
+    /**
+     What the six keys show right now — see `PadView`. Recomputed by `publish` and
+     `paint` from the registry and `boardContext`, never edited: a key press is
+     translated through it back to a registry slot, so the two cannot disagree about
+     which session a lit key means.
+     */
+    private(set) var padView = PadView()
+    /// Which sessions the pad is showing. `.all` until Superset says otherwise.
+    private var boardContext: BoardContext = .all
+    /// Which app is in front, as far as the pad's context is concerned.
+    private var front: SupersetFocus.Front = .other
+    /// Attach, prompt and jump signals; the newest names the workspace.
+    private var supersetFocus = SupersetFocus.Resolver()
+    /// Superset's host database, read-only. Opened on first need and kept open.
+    private var supersetDB: SupersetHostDatabase?
+    private var supersetDBRetryAt: Date = .distantPast
+    /// Workspace id → worktree path, for entries without a workspace id.
+    private var supersetWorktrees: [String: String] = [:]
+    private var lastSupersetLog: String?
     /// How to show the settings window. Injected by the delegate that owns it.
     var openSettings: (() -> Void)?
     /// Press versus press-and-hold on the dial.
     private var encoderClick = EncoderClick()
     private var encoderHoldTask: Task<Void, Never>?
+    /**
+     Everything the key dispatch consults, for the app in front — see `ControlMap`.
+     Rebuilt by `applyPreferences()` on every settings edit and by `frontmostChanged`
+     when another app comes forward; nothing else holds a copy of a binding.
+     */
+    private var controlMap = ControlMap.make(prefs: .default)
+    /// The app in front, by bundle id, for the per-app profiles (F2).
+    private var frontBundleID: String?
+    /// Tap versus hold on the action caps that have a long press (F2).
+    private var pressTracker = ActionPressTracker(threshold: 0.5)
+    /// One timer per cap held down, waiting for the hold threshold.
+    private var holdTasks: [String: Task<Void, Never>] = [:]
+    /// ⏎ is refused right after a snippet (F1).
+    private var enterGuard = EnterGuard()
+
+    // MARK: Two-step confirmation (F4) and NEW (F5)
+
+    /// While an action waits for APPR, the pad belongs to it — see `PendingConfirmation`.
+    private var pendingConfirmation = PendingConfirmation(window: 3)
+    private var confirmExpiryTask: Task<Void, Never>?
+    /// NEW's debounce (D2): a bouncy press never opens two terminals.
+    private var launchCooldown = LaunchCooldown(cooldown: 2)
+    private var launchCooldownMs = 2000
+
+    // MARK: Targeted control (F7, armed mode)
+
+    /// FAST held arms it; the next agent key fires without jumping. See `TargetedRun`.
+    private var targetArming = TargetArming(window: 3)
+    private var targetExpiryTask: Task<Void, Never>?
+
+    // MARK: Superset host-service (F3)
+
+    /// The live connection, while `superset.hostClient` is `auto`. Rebuilt when the
+    /// settings it was made from change; nil while off.
+    private var superset: SupersetLink?
+    private struct SupersetLink {
+        let config: Preferences.Superset
+        let transport: SupersetConnection
+        let client: SupersetHostClient
+        let events: SupersetEventStream?
+    }
+    private var supersetHealthTask: Task<Void, Never>?
+    /// Bus and hook lifecycle events → states: `Start` debounce and hook/bus dedupe.
+    private var lifecycle = LifecycleMapper(startDebounce: 0.2, dedupeWindow: 1.5)
+    private var lifecycleFlushTask: Task<Void, Never>?
+    private var bindingsRefreshTask: Task<Void, Never>?
+    /// The launch reconciliation runs once, on the first successful health check.
+    private var reconciledAtLaunch = false
+    private var lastLinkLog: String?
+    /**
+     Agents whose sessions our own hooks report. The bus never gives these a key:
+     their `SessionStart` does, and a second key for the same terminal would follow.
+     Everything else (Codex, …) is keyed by its terminal from the bus.
+     */
+    private static let hookedAgents: Set<String> = ["claude"]
+
+    /// At most one bus-driven repaint per `superset.padWriteCoalesceMs`.
+    private var padCoalescer = PadWriteCoalescer(interval: 0.09)
+    private var padCoalesceMs = 90
+    private var busPaintSeq = 0
+    private var busDrainTask: Task<Void, Never>?
+    /// What the last successful paint put on the keys and ring, so a bus event that
+    /// changes nothing visible costs no write at all.
+    private var lastPaintedLooks: [Int: Appearance]?
+    private var lastPaintedRing: [SessionState?]?
     /// Accumulated so one turn logs one line rather than one per tick.
     private var scrolledLines = 0
     private var scrollSummary: Task<Void, Never>?
@@ -124,7 +208,25 @@ final class BoardController: ObservableObject {
             Log.write("voice: off (\(why))")
         }
         guard was != voiceIsActive else { return }
+        yieldRingToVoice()
         Task { await paint() }
+    }
+
+    /// Whether the ring is dictation's right now — the rainbow, which outranks every show.
+    private var voiceOwnsRing: Bool {
+        model.preferences.ambient.voiceRainbow && voiceIsActive
+    }
+
+    /// Dictation starting cuts off whatever show is playing, so the rainbow appears
+    /// at once rather than when a lap happens to end.
+    private func yieldRingToVoice() {
+        guard voiceOwnsRing, let running = runningShow else { return }
+        Log.write("show \(running): cut off by dictation")
+        showToken += 1
+        runningShow = nil
+        runningShowPriority = nil
+        model.runningShow = nil
+        ringBusyUntil = .distantPast
     }
 
     private func scheduleVoiceGraceSweep() {
@@ -143,6 +245,16 @@ final class BoardController: ObservableObject {
     /// beginning, which turns a 4s lap into flashing.
     private var ringBusyUntil: Date = .distantPast
     private var runningShow: String?
+    /// The running show's rank, for `ShowArbiter`.
+    private var runningShowPriority: ShowPriority?
+    /// Bumped whenever a show is cut off by a higher one, so the one cut off neither
+    /// keeps writing nor hands the ring back from under its successor.
+    private var showToken = 0
+    /// Which workspace switch is current, and when the last one played. See
+    /// `TransitionTracker`.
+    private var transitions = TransitionTracker()
+    /// Flashes the borrowed key's origin color now and then. See `OverflowLook`.
+    private var overflowWinkTask: Task<Void, Never>?
 
 
     /// While absent, a reconnect should be noticed in about this long.
@@ -166,6 +278,8 @@ final class BoardController: ObservableObject {
     /// cleared so a rebind is not swallowed by the previous key's window.
     func bindingsChanged() {
         applyPreferences()
+        // On, off or reconfigured live: no restart needed to change `superset.*`.
+        configureSuperset()
 
         // Muting a surface is retroactive: the sessions already holding its keys give
         // them up here, before the repaint below, so the switch has a visible effect
@@ -175,6 +289,8 @@ final class BoardController: ObservableObject {
         // and a pid remembered as muted would keep being refused.
         mutedPIDs.removeAll()
         sweepUnlistened()
+        // `padScope` may have changed; a context change repaints on its own.
+        updateBoardContext()
         publish()
 
         // Every write saves immediately; the debounce lives in the store, so dragging
@@ -190,9 +306,80 @@ final class BoardController: ObservableObject {
      is not a swatch at 55% opacity — so this is the only preview that tells the truth.
      */
     func preview(_ state: SessionState) {
+        preview(model.appearances[state] ?? state.defaultAppearance, named: state.rawValue)
+    }
+
+    /// The restored-and-unconfirmed look (F1), from `states["unconfirmed"]`.
+    func previewUnconfirmed() {
+        preview(model.preferences.unconfirmedAppearance, named: Preferences.unconfirmedKey)
+    }
+
+    /// The order a theme is shown in, one state per key (slot 1…6).
+    private static let themePreviewStates: [SessionState] = [.working, .awaiting, .done, .error, .idle, .stalled]
+
+    /**
+     Show a color theme on the pad before choosing it: one state per key, the ring in
+     the theme's first palette color, for 3 s, then the real board. Writes nothing to the
+     preferences — choosing is the Colors pane's job.
+     */
+    func previewTheme(_ theme: ColorTheme) {
+        previewTheme(theme, then: nil)
+    }
+
+    /// The theme preview in flight, so a newer one can cut it short.
+    private var themePreviewTask: Task<Void, Never>?
+
+    /**
+     The same preview, then `done` — for "preview, then apply" in the Colors pane.
+
+     `done` runs exactly once, on every path: at once with no pad open; after the 3 s
+     otherwise, *before* the board is repainted (so the applied theme is what the
+     repaint shows); and, when a newer preview cuts this one short, at the cut — without
+     repainting, because the newer preview owns the pad now. Every theme preview, with
+     or without `done`, cancels the one in flight.
+     */
+    func previewTheme(_ theme: ColorTheme, then done: (@MainActor () -> Void)?) {
+        let finish = CallOnce(done)
+        themePreviewTask?.cancel()
+        themePreviewTask = nil
+        guard deviceIsOpen else {
+            finish.run()
+            return
+        }
+        let calibration = model.calibration
+        var looks: [Int: Appearance] = [:]
+        for (index, state) in Self.themePreviewStates.enumerated() where index < BoardLayout.slotCount {
+            looks[index + 1] = theme.appearance(for: state)
+        }
+        let ring = theme.palette.first.map {
+            CodexProtocol.LightingSide(color: $0, brightness: 0.6, effect: .solid, speed: 0)
+        } ?? .off
+
+        themePreviewTask = Task { [weak self] in
+            // Every exit calls `done` — the once-guard makes a second call a no-op.
+            defer { finish.run() }
+            guard let self, !Task.isCancelled else { return }
+            // One write: the ring config and the six keys together.
+            var batch: [[Data]] = []
+            batch.append(self.device.prepare(
+                lighting: CodexProtocol.LightingConfig(keys: .off, ambient: ring)
+            ))
+            batch += PadPaint.keyBatch(looks, calibration: calibration, transport: self.device).batch
+            try? await self.device.write(batch: batch)
+            Log.write("preview: theme \(theme.id)\(done == nil ? "" : " then apply")")
+            try? await Task.sleep(for: .seconds(3))
+            // Cut short by a newer preview: it owns the pad; only `done` runs (defer).
+            guard !Task.isCancelled else { return }
+            self.themePreviewTask = nil
+            finish.run()
+            // Always hand the board back, or the preview becomes the board.
+            await self.paint()
+        }
+    }
+
+    private func preview(_ appearance: Appearance, named name: String) {
         guard deviceIsOpen else { return }
         let calibration = model.calibration
-        let appearance = model.appearances[state] ?? state.defaultAppearance
 
         Task { [weak self] in
             guard let self else { return }
@@ -200,19 +387,10 @@ final class BoardController: ObservableObject {
             batch.append(self.device.prepare(
                 lighting: CodexProtocol.LightingConfig(keys: .off, ambient: .off)
             ))
-            for slot in 1...BoardLayout.slotCount {
-                guard let physical = calibration.physicalSlot(for: slot) else { continue }
-                guard let thread = try? CodexProtocol.ThreadState(
-                    physicalSlot: physical,
-                    color: appearance.color,
-                    brightness: appearance.brightness,
-                    effect: CodexProtocol.Effect(rawValue: appearance.effect.deviceCode) ?? .solid,
-                    speed: appearance.speed
-                ) else { continue }
-                batch.append(self.device.prepare(threads: [thread]))
-            }
+            let every = Dictionary(uniqueKeysWithValues: (1...BoardLayout.slotCount).map { ($0, appearance) })
+            batch += PadPaint.keyBatch(every, calibration: calibration, transport: self.device).batch
             try? await self.device.write(batch: batch)
-            Log.write("preview: \(state.rawValue)")
+            Log.write("preview: \(name)")
             try? await Task.sleep(for: .seconds(2))
             // Always hand the board back, or the preview becomes the board.
             await self.paint()
@@ -335,14 +513,46 @@ final class BoardController: ObservableObject {
     /// testable, which means a config change has to be pushed rather than read.
     private func applyPreferences() {
         let prefs = model.preferences
-        dispatcher.actions = model.actions
-        dispatcher.encoderClick = model.actions["ENC"]
-        dispatcher.scrollLines = prefs.scrollLines
-        dispatcher.clockwiseScrollsUp = prefs.encoder.clockwiseScrollsUp
+        // `settings`, not `preferences`: the tap bindings the UI edits live in the
+        // model's mirrored state until they are folded back.
+        controlMap = ControlMap.make(prefs: model.settings, frontBundleID: frontBundleID)
+        // Replaces every binding and clears the debounce history, so a rebind is not
+        // swallowed by the previous binding's window.
+        controlMap.configure(&dispatcher)
+        // A press in flight was timed against the old bindings; let it go silently
+        // rather than fire whatever the cap means now.
+        cancelHoldTimers()
+        pressTracker = ActionPressTracker(threshold: controlMap.longPressThreshold)
         pushToTalk.maxHoldSeconds = prefs.maxHoldSeconds
-        // Cleared so a rebind is not swallowed by the previous binding's window.
-        dispatcher.reset()
         registry.staleInterval = prefs.staleInterval
+        if prefs.launch.createCooldownMs != launchCooldownMs {
+            launchCooldownMs = prefs.launch.createCooldownMs
+            launchCooldown = LaunchCooldown(cooldown: Double(launchCooldownMs) / 1000)
+        }
+        if prefs.superset.padWriteCoalesceMs != padCoalesceMs {
+            padCoalesceMs = prefs.superset.padWriteCoalesceMs
+            padCoalescer = PadWriteCoalescer(interval: Double(padCoalesceMs) / 1000)
+        }
+    }
+
+    /// Another app came forward: the profile may differ. Only the map changes — the
+    /// debounce history and a press in flight are kept, because switching apps is not
+    /// an edit and must not eat a keypress.
+    private func frontProfileChanged() {
+        let next = ControlMap.make(prefs: model.settings, frontBundleID: frontBundleID)
+        guard next != controlMap else { return }
+        controlMap = next
+        dispatcher.longPressKeys = next.longPressKeys
+        Log.write(
+            "profile: \(frontBundleID.flatMap { model.preferences.profiles[$0] != nil ? $0 : nil } ?? "base")"
+                + " — holds on \(next.longPressKeys.sorted().joined(separator: ","))"
+        )
+    }
+
+    private func cancelHoldTimers() {
+        holdTasks.values.forEach { $0.cancel() }
+        holdTasks.removeAll()
+        pressTracker.reset()
     }
 
     func start() {
@@ -408,14 +618,21 @@ final class BoardController: ObservableObject {
         // Restore the board before anything reads it, so a session keeps the key it
         // had. Entries that cannot still be true are dropped rather than trusted —
         // see RegistryStore.
-        registry = RegistryStore.load(staleInterval: prefs.staleInterval)
+        //
+        // Superset's own terminal table is asked about each restored Superset session
+        // (read-only): one it disposed or ended comes back ended, not in the state the
+        // file saved. The rest come back unconfirmed until a live event says otherwise.
+        let liveness: (String) -> TerminalLiveness? = prefs.superset.reconcileOnLaunch
+            ? { [weak self] id in self?.openSupersetDB()?.terminalLiveness(id) }
+            : { _ in nil }
+        registry = RegistryStore.load(staleInterval: prefs.staleInterval, liveness: liveness)
         registry.staleInterval = prefs.staleInterval
         if !registry.entries.isEmpty {
             Log.write(
                 "registry: restored \(registry.entries.count) session(s) — "
                     + registry.entries
                         .sorted { $0.slot < $1.slot }
-                        .map { "\($0.slot):\($0.state.rawValue)" }
+                        .map { "\($0.slot):\($0.state.rawValue)\($0.isUnconfirmed ? "?" : "")" }
                         .joined(separator: " ")
             )
         }
@@ -424,7 +641,10 @@ final class BoardController: ObservableObject {
         startKeyInterception()
         startMicWatcher()
         startHookServer()
+        // After the registry is restored: the first health check reconciles it.
+        configureSuperset()
         startResident()
+        startOverflowWink()
         reconnect()
     }
 
@@ -439,6 +659,7 @@ final class BoardController: ObservableObject {
                 let now = self.voiceIsActive
                 guard now != was else { return }
                 Log.write("voice: \(now ? "on" : "off") (\(reason ?? "mic"))")
+                self.yieldRingToVoice()
                 await self.paint()
             }
         }
@@ -487,7 +708,18 @@ final class BoardController: ObservableObject {
         guard let direction = joystick.update(angle: angle, deflection: deflection) else {
             return
         }
-        guard let action = model.preferences.joystick.action(for: direction) else {
+        if pendingConfirmation.pending != nil {
+            resolveConfirmation(pendingConfirmation.handle(.other(key: "JOY.\(direction.rawValue)"), now: Date()))
+            return
+        }
+        let step = targetArming.otherKey(now: Date())
+        if step != .none {
+            handleTargeting(step)
+            return
+        }
+        // Per app: with Superset in front the stick switches workspaces and tabs.
+        let resolved = controlMap.joystick[direction]
+        guard let resolved, let action = resolved.action else {
             Log.write("stick \(direction.rawValue): unbound")
             return
         }
@@ -495,22 +727,42 @@ final class BoardController: ObservableObject {
         // part that cannot be verified by reading the code — it depends on how the
         // hardware is oriented.
         Log.write(String(format: "stick %@ (a=%.3f)", direction.rawValue, angle))
-        perform(action, key: "JOY.\(direction.rawValue)")
+        perform(action, key: resolved.payloadKey)
     }
 
     private func handle(key event: KeyEvent) {
         guard let intent = dispatcher.intent(for: event) else { return }
+        // A pending confirmation owns the pad: APPR confirms, any other key cancels
+        // and does not do its own thing (F4). Releases and the dial's turn pass.
+        if pendingConfirmation.pending != nil, let input = confirmationInput(for: intent) {
+            resolveConfirmation(pendingConfirmation.handle(input, now: Date()))
+            return
+        }
+        // Armed (F7): the key aims or cancels, and does not do its own thing — above all
+        // an agent key does not jump.
+        if case let .consumed(step) = TargetedRun.route(
+            intent, arming: &targetArming, taps: controlMap.taps, now: Date()
+        ) {
+            handleTargeting(step)
+            return
+        }
         switch intent {
-        case let .jump(slot):
-            jump(to: slot)
+        case let .jump(key):
+            // A pad key, not a registry slot: in a workspace context key 1 is the
+            // workspace's first session, wherever it sits in the registry.
+            jump(fromPadKey: key)
         case let .action(action, key):
             perform(action, key: key)
         case .encoderPressed:
             encoderPressed()
+        case let .actionPressed(key):
+            actionPressed(key)
 
         case let .release(key):
-            // Only push-to-talk cares about the release edge, and only when the key
-            // that was released is the one holding it — otherwise any other key's
+            // A cap waiting to tell a tap from a hold resolves here if it was short.
+            actionReleased(key)
+            // Otherwise only push-to-talk cares about the release edge, and only when
+            // the key that was released is the one holding it — any other key's
             // release would end the dictation.
             if key == "ENC_CLK" {
                 encoderReleased()
@@ -524,16 +776,49 @@ final class BoardController: ObservableObject {
         }
     }
 
+    private func jump(fromPadKey key: Int) {
+        guard let sessionID = padView.sessionID(forKey: key),
+              let entry = registry.entry(forSession: sessionID) else {
+            Log.write("key: pad key \(key) has no session")
+            return
+        }
+        if entry.slot != key || padView.context != .all {
+            Log.write("key: pad key \(key) is slot \(entry.slot)"
+                + (padView.overflowKey == key ? " (borrowed from another workspace)" : ""))
+        }
+        jump(to: entry.slot)
+    }
+
     private func jump(to slot: Int) {
         guard let view = model.slots.first(where: { $0.slot == slot }), view.isOccupied else {
             Log.write("key: slot \(slot) has no session")
             return
         }
+        // Going to a workspace is the strongest word on which one you are in — ahead
+        // of Superset's own attach, which follows a second later.
+        if let workspace = view.supersetWorkspaceID {
+            noteSupersetSignal(.init(workspaceID: workspace, at: Date(), source: .jump))
+        }
         let outcome = Focus.raise(view)
-        Log.write("key: jump to slot \(slot) -> \(outcome)")
+        Log.write("key: jump to \(describeKey(slot: slot)) -> \(outcome)")
     }
 
+    /// A press whose key is still down when it fires: an action cap can hold, the dial
+    /// and the stick cannot.
     private func perform(_ action: KeyAction, key: String) {
+        let isCap = BoardLayout.cells.contains { $0.isAction && $0.id == key }
+        perform(action, key: key, holdKey: isCap ? key : nil)
+    }
+
+    /**
+     - Parameter key: the payload key — a cap ("ACT06"), "ACT09.long@<bundle>",
+       "JOY.up@<bundle>", "ENC.long" — which is what shortcuts and snippets are
+       looked up by.
+     - Parameter holdKey: the physical cap still down, whose release ends a hold. Nil
+       when nothing can be held: the release already happened (a tap resolved on
+       the way up) or the control has no release edge.
+     */
+    private func perform(_ action: KeyAction, key: String, holdKey: String?) {
         Log.write("key \(key) -> \(action.rawValue)")
         switch action {
         case .sync:
@@ -558,46 +843,64 @@ final class BoardController: ObservableObject {
             let outcome = Actions.respond(decision, slots: model.slots)
             switch outcome {
             case let .sent(slot):
-                Log.write("key \(key): \(action.rawValue) sent to slot \(slot)")
+                Log.write("key \(key): \(action.rawValue) sent to \(describeKey(slot: slot))")
             case .nothingPending:
                 Log.write("key \(key): nothing is waiting")
             case let .ambiguous(slots):
                 // Refusing is the feature. Guessing would answer a prompt the user
                 // never read.
                 Log.write(
-                    "key \(key): refused — slots \(slots.map(String.init).joined(separator: ", ")) "
-                        + "are both waiting; press one of those keys"
+                    "key \(key): refused — \(slots.map { describeKey(slot: $0) }.joined(separator: ", ")) "
+                        + "are all waiting; press one of those keys"
                 )
             case let .focusFailed(slot, reason):
-                Log.write("key \(key): slot \(slot) never came forward (\(reason)) — not sent")
+                Log.write("key \(key): \(describeKey(slot: slot)) never came forward (\(reason)) — not sent")
             case let .failed(detail):
                 Log.write("key \(key): \(detail)")
             }
 
         case .snippet:
-            let text = model.snippets[key] ?? model.snippet
+            let text = model.snippets[key]
+                ?? model.snippets[ProfileResolver.baseKey(of: key)]
+                ?? model.snippet
+            // The config is hand-editable; a key that would end or wipe the session in
+            // front is refused here, whatever the file says (F1).
+            if case let .block(reason) = SnippetGuard.check(
+                text, allowDangerous: model.preferences.snippetsAllowDangerous
+            ) {
+                Log.write("key \(key): snippet blocked — \(reason)")
+                return
+            }
             let result = Actions.typeSnippet(text)
+            if result.ok { enterGuard.noteSnippet(now: Date()) }
             Log.write(result.ok ? "key \(key): typed \(text)" : "key \(key): \(result.detail)")
 
         case .enter:
+            // Not blind: ⏎ right after a snippet would submit it unread (F1).
+            guard enterGuard.allowsEnter(now: Date()) else {
+                Log.write(
+                    "key \(key): ⏎ refused — a snippet was typed less than "
+                        + "\(Int(enterGuard.window))s ago"
+                )
+                return
+            }
             let result = Actions.pressEnter()
             Log.write(result.ok ? "key \(key): sent ⏎" : "key \(key): \(result.detail)")
 
         case .shortcut:
-            guard let shortcut = model.preferences.shortcuts[key] else {
+            // `<key>@<bundle>` first, then the bare key: a per-app chord wins.
+            guard let shortcut = ProfileResolver.shortcut(forPayloadKey: key, prefs: model.preferences) else {
                 Log.write("key \(key): no shortcut recorded")
                 return
             }
-            // Hold needs a release edge, and only the action caps deliver one. The file
-            // is hand-editable, so a hold on the dial or the stick is sent as a tap
-            // rather than left to the 60s backstop.
-            let canHold = BoardLayout.cells.contains { $0.isAction && $0.id == key }
-            if shortcut.mode == .hold, canHold {
-                pushToTalk.begin(shortcut, key: key)
+            // Hold needs a release edge, and only a cap still down delivers one. The
+            // file is hand-editable, so a hold on the dial or the stick — or on a cap
+            // already released — is sent as a tap rather than left to the 60s backstop.
+            if shortcut.mode == .hold, let holdKey {
+                pushToTalk.begin(shortcut, key: holdKey)
             } else {
                 if shortcut.mode == .hold { Log.write("key \(key): cannot hold here — tapping") }
-                let result = Actions.press(shortcut)
-                Log.write(result.ok ? "key \(key): sent \(shortcut.label)" : "key \(key): \(result.detail)")
+                sendShortcut(shortcut, key: key)
             }
 
         case .newtab:
@@ -636,7 +939,13 @@ final class BoardController: ObservableObject {
         case .voiceTalk:
             // The release edge ends it — see PushToTalk for why this is never trusted
             // to happen on its own.
-            pushToTalk.begin(key: key, dictation: true)
+            guard let holdKey else {
+                // The cap has a long press, so its tap only arrives on the way up —
+                // too late to hold anything.
+                Log.write("key \(key): voice-talk needs the key held, and it was released — nothing sent")
+                return
+            }
+            pushToTalk.begin(key: holdKey, dictation: true)
 
         case .voiceToggle:
             let result = Actions.toggleVoice()
@@ -672,6 +981,52 @@ final class BoardController: ObservableObject {
             // Pressing it again stops it, so the key that starts the show can always
             // end it — `playCountdown` toggles.
             playCountdown()
+
+        case .jumpOldestWaiting:
+            jumpOldestWaiting(key: key)
+
+        case .supersetNewAgent:
+            launchNewAgent(key: key)
+
+        case .targetedArm:
+            armTargeting(key: key)
+
+        case .interruptFocused:
+            interruptFocused(key: key)
+
+        case .supersetHandoff:
+            armHandoff(key: key)
+        }
+    }
+
+    /**
+     Send a tapped chord `repeats` times, `Shortcut.repeatGap` apart (⎋⎋ from one press).
+     The first goes out at once, exactly as before; the rest follow on a task, in order,
+     and stop at the first failure. The sequence is `Shortcut.sendDelays`.
+     */
+    private func sendShortcut(_ shortcut: Shortcut, key: String) {
+        let delays = shortcut.sendDelays
+        let first = Actions.press(shortcut)
+        guard first.ok else {
+            Log.write("key \(key): \(first.detail)")
+            return
+        }
+        guard delays.count > 1 else {
+            Log.write("key \(key): sent \(shortcut.label)")
+            return
+        }
+        Task { @MainActor in
+            var sent = 1
+            for delay in delays.dropFirst() {
+                try? await Task.sleep(for: .milliseconds(Int(delay * 1000)))
+                let result = Actions.press(shortcut)
+                guard result.ok else {
+                    Log.write("key \(key): sent \(shortcut.label) ×\(sent), then \(result.detail)")
+                    return
+                }
+                sent += 1
+            }
+            Log.write("key \(key): sent \(shortcut.label) ×\(sent)")
         }
     }
 
@@ -690,7 +1045,7 @@ final class BoardController: ObservableObject {
      indicator never appeared and each edit leaked another observer and poll loop.
      */
     private func startFocusWatcher() {
-        let watcher = FocusWatcher { [weak self] surface in
+        let watcher = FocusWatcher(onChange: { [weak self] surface in
             guard let self, self.focused != surface else { return }
             self.focused = surface
             // Which slot it matched, not just what was in front. A handle that matches
@@ -711,43 +1066,748 @@ final class BoardController: ObservableObject {
             Log.write("focus: \(Self.describe(surface))" + (emitted ?? ""))
             self.publish()
             Task { await self.paint() }
-        }
+        }, onFrontmost: { [weak self] bundleID in
+            self?.frontmostChanged(bundleID)
+        }, onSupersetPoll: { [weak self] in
+            self?.readSupersetAttach()
+            self?.updateBoardContext()
+        })
         focusWatcher = watcher
         watcher.start()
     }
 
+    // MARK: - workspace context
+
+    /// Surfaces whose sessions live outside any Superset workspace. With one of these
+    /// in front, filtering by a workspace would hide the sessions you are using.
+    private static let terminalHostBundleIDs: Set<String> = [
+        "com.apple.Terminal", Cmux.bundleID, VSCodeWindows.bundleID, "com.googlecode.iterm2",
+    ]
+
+    private func frontmostChanged(_ bundleID: String?) {
+        if frontBundleID != bundleID {
+            frontBundleID = bundleID
+            frontProfileChanged()
+        }
+        front = switch bundleID {
+        case Focus.supersetBundleID?: .superset
+        case let id? where Self.terminalHostBundleIDs.contains(id): .terminalHost
+        default: .other
+        }
+        if front == .superset, model.preferences.padScope == .focusedWorkspace {
+            // Coming back is when a workspace created meanwhile is worth learning.
+            supersetWorktrees = openSupersetDB()?.worktrees() ?? supersetWorktrees
+            readSupersetAttach()
+        }
+        updateBoardContext()
+    }
+
+    /// The database, opened on first need. A failure is retried, but not every poll:
+    /// discovery lists a directory, and a Superset that is not installed never will be.
+    private func openSupersetDB() -> SupersetHostDatabase? {
+        if let supersetDB { return supersetDB }
+        guard Date() >= supersetDBRetryAt else { return nil }
+        supersetDBRetryAt = Date().addingTimeInterval(30)
+        guard let url = SupersetFocus.databaseURL(),
+              let db = SupersetHostDatabase(url: url) else {
+            lastSupersetLog = Log.changed(
+                "superset", last: lastSupersetLog,
+                to: "host.db not found or unreadable — the pad shows every session"
+            )
+            return nil
+        }
+        supersetDB = db
+        supersetWorktrees = db.worktrees()
+        lastSupersetLog = Log.changed("superset", last: lastSupersetLog, to: "reading \(url.path)")
+        return db
+    }
+
+    private func readSupersetAttach() {
+        guard model.preferences.padScope == .focusedWorkspace else { return }
+        if let signal = openSupersetDB()?.latestAttach() { supersetFocus.note(signal) }
+    }
+
+    private func noteSupersetSignal(_ signal: SupersetFocus.Signal) {
+        supersetFocus.note(signal)
+        updateBoardContext()
+    }
+
+    /// Recompute the context and act on a change. Cheap enough to call on every poll:
+    /// nothing happens unless the answer moves.
+    private func updateBoardContext() {
+        let scope = model.preferences.padScope
+        let winner = supersetFocus.winner
+        if scope == .focusedWorkspace, front == .superset, winner == nil {
+            lastSupersetLog = Log.changed(
+                "superset", last: lastSupersetLog,
+                to: "no workspace signal yet — the pad shows every session"
+            )
+        }
+        let next = SupersetFocus.context(
+            scope: scope, front: front, resolved: winner?.workspaceID, previous: boardContext
+        )
+        guard next != boardContext else { return }
+        let previous = boardContext
+        boardContext = next
+        if case .superset = next, let winner {
+            Log.write("pad: \(Self.describe(previous)) -> \(Self.describe(next)) (by \(winner.source.rawValue))")
+        } else {
+            Log.write("pad: \(Self.describe(previous)) -> \(Self.describe(next))")
+        }
+        workspaceContextChanged(from: previous, to: next)
+    }
+
     /**
-     Move to the next or previous occupied key, and raise it.
+     The pad is about to show a different set of sessions.
 
-     Wraps, and skips empty slots — stepping through five free keys to reach the one
-     other session would make the control useless on a board that is mostly empty,
-     which is the normal case.
-
-     Starts from whatever is focused, so it walks from where you are rather than from
-     slot 1 every time.
+     Plays the transition — "Barrido + recuento": the ring sweeps once in the
+     workspace's color and the keys light one after another. What plays and when is
+     decided by `TransitionTracker` and `TransitionPlayback`; this only sleeps and
+     writes. It always ends in `paint()`, which draws from `boardContext` — already
+     set to `to` by the time this runs — so the animation decides the order things
+     appear in, never what they end up showing.
      */
-    private func stepSession(forward: Bool) {
-        let occupied = model.slots.filter(\.isLive).map(\.slot).sorted()
-        guard !occupied.isEmpty else {
-            Log.write("key JOY: no sessions to step to")
+    func workspaceContextChanged(from previous: BoardContext, to next: BoardContext) {
+        publish()
+        let generation = transitions.contextChanged()
+        Task { await playTransition(generation: generation, to: next) }
+    }
+
+    private func playTransition(generation: Int, to next: BoardContext) async {
+        let settings = model.preferences.workspaceTransition
+        // Cycling through workspaces with the shortcut animates only where you stop.
+        if settings.debounceMs > 0 {
+            try? await Task.sleep(for: .milliseconds(settings.debounceMs))
+        }
+        guard transitions.isCurrent(generation) else { return }
+        // Whatever owns the pad instead — a capture, fun mode, no pad — `paint` already
+        // knows how to stand down for.
+        guard deviceIsOpen, calibrationTask == nil, countdown?.isRunning != true else {
+            await paint()
             return
         }
+        // One writer: wait out a repaint already in flight rather than interleave.
+        while isPainting {
+            try? await Task.sleep(for: .milliseconds(20))
+            guard transitions.isCurrent(generation) else { return }
+        }
+
+        padView = composePadView()
+        let looks = keyLooks()
+        let mode = Ambient.Mode(rawValue: model.preferences.ambient.mode) ?? .events
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard let plan = transitions.plan(
+            generation: generation,
+            now: Date(),
+            to: next,
+            roles: looks.mapValues { TransitionPlanner.role(of: $0.state) },
+            overflowKey: padView.overflowKey,
+            settings: settings,
+            reduceMotion: reduceMotion,
+            ringFree: TransitionPlanner.ringFree(
+                mode: mode, ringStates: padView.ringStates,
+                appearances: model.appearances, voiceActive: voiceOwnsRing
+            )
+        ) else { return }
+
+        if plan.ring != .none, case let .superset(workspaceID) = next {
+            let color = WorkspaceColors.color(
+                for: workspaceID,
+                identity: model.preferences.workspaceIdentity,
+                stateColors: model.appearances.values.map(\.color)
+            )
+            // Through the arbiter like any lap: it never cuts off a prompt or a failure.
+            play(
+                show: plan.ring == .sweep
+                    ? Shows.workspaceSweep(color: color, settings: settings)
+                    : Shows.workspaceCut(color: color),
+                priority: .workspace
+            )
+        }
+        guard plan.kind == .cascade else {
+            await paint()
+            return
+        }
+
+        // The cascade holds the paint lane: a hook or the resident loop asking for a
+        // repaint meanwhile is coalesced into the one below, not interleaved.
+        isPainting = true
+        let start = ContinuousClock.now
+        var playback = TransitionPlayback(plan)
+        var outcome = "played"
+        cascade: while true {
+            switch playback.next(isCurrent: transitions.isCurrent(generation) && deviceIsOpen) {
+            case let .wait(untilMs):
+                try? await Task.sleep(until: start + .milliseconds(untilMs), clock: .continuous)
+            case let .write(frame):
+                var frameLooks: [Int: Appearance] = [:]
+                for (key, look) in frame.keys {
+                    frameLooks[key] = look == .final ? (looks[key]?.look ?? .off) : .off
+                }
+                let batch = PadPaint.keyBatch(frameLooks, calibration: model.calibration, transport: device).batch
+                guard !batch.isEmpty else { continue }
+                do {
+                    try await device.write(batch: batch)
+                } catch {
+                    // `paint` below meets the same failure and owns what it means.
+                    outcome = "write failed"
+                    break cascade
+                }
+            case .abort:
+                outcome = "interrupted"
+                break cascade
+            case .finish, .done:
+                break cascade
+            }
+        }
+        isPainting = false
+        repaintWanted = false
+        Log.write(
+            "pad: transition \(outcome) (\(plan.frames.count) writes, ring \(plan.ring))"
+        )
+        await paint()
+    }
+
+    /**
+     What each pad key shows right now, from `padView` — the one place a key's final
+     look is decided, so `paint` and the transition cannot disagree about it.
+
+     `state` is the session's own, before the focus overlay: the transition asks it
+     whether a key needs a human.
+     */
+    private func keyLooks() -> [Int: (look: Appearance, state: SessionState?)] {
+        var looks: [Int: (look: Appearance, state: SessionState?)] = [:]
+        for key in 1...BoardLayout.slotCount {
+            let entry = padView.sessionID(forKey: key).flatMap { registry.entry(forSession: $0) }
+            // A free slot and a finished session both mean "nothing to look at".
+            // `viewing` is applied here rather than stored — see Viewing.
+            let viewing = entry.map { isFocused($0, name: name(of: $0)) } ?? false
+            let state = entry.map { Viewing.display($0.state, isFocused: viewing) } ?? .ended
+            var look = Viewing.appearance(state, isFocused: viewing, from: model.appearances)
+            // Still, where every local key breathes: not from here.
+            // Restored from disk and not yet confirmed by a live event: not trusted
+            // enough to shout, so it gets the dim "unconfirmed" look (F1, D11).
+            if let entry, entry.isUnconfirmed, !viewing {
+                look = model.preferences.unconfirmedAppearance
+            }
+            if key == padView.overflowKey {
+                look = OverflowLook.appearance(look, settings: model.preferences.overflow)
+            }
+            looks[key] = (look, entry?.state)
+        }
+        return looks
+    }
+
+    /**
+     Every few seconds the borrowed key shows, for a moment, the color of the workspace
+     its prompt lives in — "urgent, and over there".
+
+     Two writes each time, taken inside the paint lane like any other; skipped
+     outright when the lane is busy rather than queued, because a wink is never worth
+     delaying a real repaint for.
+     */
+    private func startOverflowWink() {
+        overflowWinkTask?.cancel()
+        overflowWinkTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let every = self?.model.preferences.overflow.winkEveryMs ?? 3000
+                try? await Task.sleep(for: .milliseconds(every))
+                guard let self, !Task.isCancelled else { return }
+                await self.winkOverflowKey()
+            }
+        }
+    }
+
+    private func winkOverflowKey() async {
+        let overflow = model.preferences.overflow
+        guard OverflowLook.winkAllowed(
+            settings: overflow,
+            transition: model.preferences.workspaceTransition,
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        ) else { return }
+        guard deviceIsOpen, !isPainting, calibrationTask == nil, countdown?.isRunning != true,
+              let key = padView.overflowKey,
+              let entry = padView.sessionID(forKey: key).flatMap({ registry.entry(forSession: $0) }),
+              let origin = PadView.workspace(of: entry, worktrees: supersetWorktrees)
+        else { return }
+        let color = WorkspaceColors.color(
+            for: origin,
+            identity: model.preferences.workspaceIdentity,
+            stateColors: model.appearances.values.map(\.color)
+        )
+        let calibration = model.calibration
+
+        isPainting = true
+        let wink = PadPaint.keyBatch(
+            [key: OverflowLook.wink(origin: color, settings: overflow)],
+            calibration: calibration, transport: device
+        ).batch
+        let back = PadPaint.keyBatch(
+            [key: keyLooks()[key]?.look ?? .off], calibration: calibration, transport: device
+        ).batch
+        if (try? await device.write(batch: wink)) != nil {
+            try? await Task.sleep(for: .milliseconds(overflow.winkMs))
+            try? await device.write(batch: back)
+        }
+        isPainting = false
+        // Anything that changed during the wink — the key may no longer be borrowed.
+        if repaintWanted {
+            repaintWanted = false
+            await paint()
+        }
+    }
+
+    private func composePadView() -> PadView {
+        PadView.compose(
+            entries: registry.entries, context: boardContext, worktrees: supersetWorktrees,
+            borrowOverflow: model.preferences.overflow.enabled
+        )
+    }
+
+    private static func describe(_ context: BoardContext) -> String {
+        switch context {
+        case .all: return "all sessions"
+        case let .superset(workspaceID): return "workspace \(workspaceID.prefix(8))"
+        }
+    }
+
+    /**
+     Move to the next or previous lit key, and raise it (BRANCH).
+
+     Walks the keys the pad is showing — `padView.nextKey` — not the registry: in a
+     workspace context stepping through every slot would walk out of the workspace in
+     front. Wraps, skips dark keys and never lands on the key lent to another
+     workspace.
+
+     Starts from the key of whatever is focused, so it walks from where you are rather
+     than from key 1 every time.
+     */
+    private func stepSession(forward: Bool) {
         // The published flag rather than a second comparison of its own: this used to
         // match a tty by suffix while `publish` matched it exactly, so the two could
         // disagree about which slot you were in, and only one of them painted.
-        let current = model.slots.first { slot in
-            slot.isLive && slot.cwd != nil && slot.isFocused
-        }?.slot
-
-        let next: Int
-        if let current, let index = occupied.firstIndex(of: current) {
-            let step = forward ? 1 : -1
-            next = occupied[(index + step + occupied.count) % occupied.count]
-        } else {
-            next = forward ? occupied.first! : occupied.last!
+        let focusedSession = model.slots.first { $0.isLive && $0.cwd != nil && $0.isFocused }?.sessionID
+        let current = focusedSession.flatMap { id in padView.keys.first { $0.value == id }?.key }
+        guard let next = padView.nextKey(from: current, forward: forward) else {
+            Log.write("key BRANCH: no sessions to step to")
+            return
         }
-        Log.write("key JOY: session \(next)")
-        jump(to: next)
+        Log.write("key BRANCH: \(current.map { "key \($0)" } ?? "nothing focused") -> key \(next)")
+        jump(fromPadKey: next)
+    }
+
+    /**
+     APPR held: go to the session that has waited on you the longest, in any
+     workspace (F6 v1 — from the registry's own transitions).
+
+     A restored, still-unconfirmed session is not a candidate: its "waiting" is what
+     the file said before the restart, and jumping to it would be trusting exactly
+     what the unconfirmed look is there to distrust.
+     */
+    private func jumpOldestWaiting(key: String) {
+        // v2: with the host-service up, a bus session (no hooks) is dated by the
+        // moment Superset saw its prompt or failure — `lastEventAt` — rather than by
+        // when this app first heard of it, which after a launch sync is "just now".
+        guard let client = superset?.client else {
+            pickOldestWaiting(key: key, busSince: [:])
+            return
+        }
+        Task { [weak self] in
+            let bindings = (try? await client.agents(workspaceID: nil)) ?? []
+            var since: [String: Date] = [:]
+            for binding in bindings where binding.lastEventType == .permissionRequest || binding.lastEventType == .failed {
+                if let at = binding.lastEventAt { since[binding.terminalID] = at }
+            }
+            self?.pickOldestWaiting(key: key, busSince: since)
+        }
+    }
+
+    private func pickOldestWaiting(key: String, busSince: [String: Date]) {
+        let candidates = registry.entries
+            .filter { !$0.isUnconfirmed }
+            .map { entry in
+                let since = entry.isBusBorn
+                    ? entry.supersetTerminalID.flatMap { busSince[$0] } ?? entry.stateSince
+                    : entry.stateSince
+                return OldestWaiting.Candidate(sessionID: entry.sessionID, state: entry.state, since: since)
+            }
+        guard let pick = OldestWaiting.pick(candidates),
+              let entry = registry.entry(forSession: pick.sessionID) else {
+            Log.write("key \(key): nothing is waiting")
+            return
+        }
+        let waited = Int(Date().timeIntervalSince(pick.since))
+        Log.write("key \(key): oldest waiting is \(describeKey(slot: entry.slot)) (\(pick.state.rawValue) for \(waited)s)")
+        jump(to: entry.slot)
+    }
+
+    // MARK: - two-step confirmation (F4)
+
+    /// What a key means to a pending confirmation; nil lets it through (a release,
+    /// the dial's turn), which must never be swallowed.
+    private func confirmationInput(for intent: KeyDispatcher.Intent) -> PendingConfirmation.Input? {
+        switch intent {
+        case let .action(action, key):
+            return action == .approve ? .approve : .other(key: key)
+        case let .actionPressed(key):
+            // APPR has a long press, so it arrives here: the press alone confirms.
+            return controlMap.taps[key] == .approve ? .approve : .other(key: key)
+        case let .jump(slot):
+            return .other(key: "AG\(slot)")
+        case .encoderPressed:
+            return .other(key: "ENC_CLK")
+        case .release, .scroll:
+            return nil
+        }
+    }
+
+    /**
+     Ask "are you sure?" on the ring for `confirm.windowMs`. Only one at a time: arming
+     another replaces the first. Lapsing does nothing but put the ring back.
+     */
+    private func armConfirmation(_ action: PendingAction) {
+        let look = model.preferences.confirm
+        pendingConfirmation = PendingConfirmation(window: Double(look.windowMs) / 1000)
+        pendingConfirmation.arm(action, now: Date())
+        Log.write("confirm: \(Self.describe(action)) armed for \(look.windowMs)ms — APPR confirms, any other key cancels")
+        play(
+            show: Shows.confirm(color: look.color, effect: look.effect, brightness: look.brightness, milliseconds: look.windowMs),
+            priority: .confirm
+        )
+        confirmExpiryTask?.cancel()
+        confirmExpiryTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(look.windowMs + 20))
+            guard let self, !Task.isCancelled else { return }
+            if let lapsed = self.pendingConfirmation.expire(now: Date()) {
+                Log.write("confirm: \(Self.describe(lapsed)) lapsed — nothing ran")
+                self.endConfirmShow()
+            }
+        }
+    }
+
+    private func resolveConfirmation(_ outcome: PendingConfirmation.Outcome) {
+        confirmExpiryTask?.cancel()
+        confirmExpiryTask = nil
+        switch outcome {
+        case .passThrough:
+            return
+        case let .confirmed(action):
+            endConfirmShow()
+            Log.write("confirm: \(Self.describe(action)) confirmed")
+            execute(action)
+        case let .cancelled(action):
+            endConfirmShow()
+            Log.write("confirm: \(Self.describe(action)) cancelled — the key did nothing else")
+        }
+    }
+
+    private func execute(_ action: PendingAction) {
+        switch action {
+        case .probe:
+            Log.write("confirm: probe — a test, nothing runs")
+        case .handoff:
+            runHandoff(action)
+        }
+    }
+
+    /// The question is gone: the ring must stop asking it.
+    private func endConfirmShow() { endShow(named: "confirm") }
+
+    /// Stop a show early if it is the one running, and hand the ring back.
+    private func endShow(named name: String) {
+        guard runningShow == name else { return }
+        showToken += 1
+        runningShow = nil
+        runningShowPriority = nil
+        model.runningShow = nil
+        ringBusyUntil = .distantPast
+        Task { await paint() }
+    }
+
+    private static func describe(_ action: PendingAction) -> String {
+        switch action {
+        case .probe: "probe"
+        case let .handoff(terminal, _, agent): "handoff to \(agent) [\(terminal.prefix(8))]"
+        }
+    }
+
+    /// "Try on the pad": plays the confirmation light and arms the harmless probe, so
+    /// APPR / another key / waiting can all be tried without anything running.
+    func previewConfirm() {
+        guard deviceIsOpen else { return }
+        armConfirmation(.probe)
+    }
+
+    /// "Try the sweep": the ring part of a workspace switch, in the current
+    /// workspace's color (or the palette's first), with the configured style.
+    func previewWorkspaceSweep() {
+        let settings = model.preferences.workspaceTransition
+        let workspace: String? = if case let .superset(id) = boardContext { id } else { supersetFocus.winner?.workspaceID }
+        let color = workspace.map {
+            WorkspaceColors.color(
+                for: $0, identity: model.preferences.workspaceIdentity,
+                stateColors: model.appearances.values.map(\.color)
+            )
+        } ?? model.preferences.workspaceIdentity.palette.first ?? RGB(0xFFFFFF)
+        let show = settings.style == .cut
+            ? Shows.workspaceCut(color: color)
+            : Shows.workspaceSweep(color: color, settings: settings)
+        Log.write("preview: workspace \(settings.style.rawValue)")
+        _ = play(show: show, priority: .workspace)
+    }
+
+    // MARK: - targeted control (F7)
+
+    /// FAST held (D10): arm a send of `targeted.defaultSnippet` for the next agent key.
+    private func armTargeting(key: String) {
+        let targeted = model.preferences.targeted
+        guard targeted.mode == .armed else {
+            // Chord mode would delay every jump to the release; not built (D10).
+            Log.write("key \(key): targeted mode '\(targeted.mode.rawValue)' is not available — use 'armed'")
+            return
+        }
+        targetArming = TargetArming(window: Double(targeted.windowMs) / 1000, snippet: targeted.defaultSnippet)
+        handleTargeting(targetArming.arm(now: Date()))
+    }
+
+    private func handleTargeting(_ step: TargetArming.Step) {
+        switch step {
+        case .none:
+            return
+        case let .armed(intent):
+            let targeted = model.preferences.targeted
+            let color = intent == .interrupt
+                ? (model.appearances[.error] ?? SessionState.error.defaultAppearance).color
+                : model.preferences.confirm.color
+            // The text is not logged: only which kind is armed.
+            Log.write("targeted: armed \(Self.describe(intent)) — press an agent key\(intent == .interrupt ? "" : " (REJ: interrupt instead)")")
+            endShow(named: "targeted")
+            _ = play(
+                show: Shows.targetArmed(color: color, brightness: model.preferences.confirm.brightness, milliseconds: targeted.windowMs),
+                priority: .confirm
+            )
+            targetExpiryTask?.cancel()
+            targetExpiryTask = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(targeted.windowMs + 20))
+                guard let self, !Task.isCancelled else { return }
+                if self.targetArming.expire(now: Date()) == .cancelled {
+                    Log.write("targeted: lapsed — nothing sent")
+                    self.endShow(named: "targeted")
+                }
+            }
+        case let .fire(intent, padKey):
+            targetExpiryTask?.cancel()
+            endShow(named: "targeted")
+            fireTargeted(intent, padKey: padKey)
+        case .cancelled:
+            targetExpiryTask?.cancel()
+            endShow(named: "targeted")
+            Log.write("targeted: cancelled — the key did nothing else")
+        }
+    }
+
+    private static func describe(_ intent: TargetedControl.Intent) -> String {
+        switch intent {
+        case .interrupt: "interrupt"
+        case .send: "send"
+        }
+    }
+
+    /// An agent key while armed: aim at that key's session, without jumping to it.
+    private func fireTargeted(_ intent: TargetedControl.Intent, padKey: Int) {
+        guard let entry = padView.sessionID(forKey: padKey).flatMap({ registry.entry(forSession: $0) }) else {
+            refuseTargeted("key \(padKey) has no session")
+            return
+        }
+        target(intent, at: entry, label: describeKey(slot: entry.slot))
+    }
+
+    /// REJ held: interrupt the session in front of you.
+    private func interruptFocused(key: String) {
+        guard let focused = model.slots.first(where: { $0.isLive && $0.isFocused }),
+              let sessionID = focused.sessionID,
+              let entry = registry.entry(forSession: sessionID) else {
+            refuseTargeted("\(key): no focused session to interrupt")
+            return
+        }
+        target(.interrupt, at: entry, label: describeKey(slot: entry.slot))
+    }
+
+    /**
+     Snapshot, plan and send through the host-service (`TargetedRun.fire`). Only the
+     outcome is logged — "sent N bytes to key K" — never the snapshot or the text.
+     */
+    private func target(_ intent: TargetedControl.Intent, at entry: SessionRegistry.Entry, label: String) {
+        guard let client = superset?.client else {
+            refuseTargeted("\(label): the Superset host client is off or not connected")
+            return
+        }
+        guard let terminal = entry.supersetTerminalID, let workspace = entry.supersetWorkspaceID else {
+            refuseTargeted("\(label): not a Superset terminal")
+            return
+        }
+        let limits = model.preferences.targeted
+        let sessionID = entry.sessionID
+        Task { [weak self] in
+            let report = await TargetedRun.fire(
+                intent, terminalID: terminal, workspaceID: workspace, host: client, limits: limits
+            )
+            guard let self else { return }
+            // The only line logged: sizes and reasons, never the text or the screen.
+            Log.write(TargetedRun.logLine(report, intent: intent, label: label))
+            switch report {
+            case .done:
+                if intent == .interrupt {
+                    // Agents fire no hook on ⎋: the key would stay "working" otherwise.
+                    let previous = self.registry.entry(forSession: sessionID)?.state
+                    self.registry.setState(sessionID: sessionID, to: .idle)
+                    self.publish()
+                    self.fireLap(from: previous, sessionID: sessionID)
+                    await self.paint()
+                }
+            case .refused, .failed:
+                _ = self.play(show: Shows.refused(), priority: .confirm)
+            }
+        }
+    }
+
+    private func refuseTargeted(_ why: String) {
+        Log.write("targeted: refused — \(why)")
+        _ = play(show: Shows.refused(), priority: .confirm)
+    }
+
+    // MARK: - handoff (F8)
+
+    /// Where the pending handoff comes from, as the log names it ("key 2 · app").
+    private var handoffLabel = ""
+
+    /**
+     CODEX held: propose handing the focused Superset terminal to `launch.handoffAgent`.
+     Nothing runs yet — the ring asks, and only APPR goes on (`PendingConfirmation`).
+     Without a client, in read-only, or with no Superset terminal in front: the amber
+     blink, and no call at all.
+     */
+    private func armHandoff(key: String) {
+        guard superset?.client != nil else {
+            refuseHandoff("\(key): the Superset host client is off or not connected")
+            return
+        }
+        switch model.supersetLink {
+        case .versionMismatch, .connected(_, true):
+            refuseHandoff("\(key): read-only — the Superset version is not the tested one")
+            return
+        default:
+            break
+        }
+        let focused = model.slots.first { $0.isLive && $0.isFocused }
+        let entry = focused?.sessionID.flatMap { registry.entry(forSession: $0) }
+        let source = entry.flatMap { entry -> (terminalID: String, workspaceID: String)? in
+            guard let terminal = entry.supersetTerminalID, let workspace = entry.supersetWorkspaceID else { return nil }
+            return (terminal, workspace)
+        }
+        guard let entry,
+              let action = LaunchPolicy.handoff(focused: source, agent: model.preferences.launch.handoffAgent) else {
+            refuseHandoff("\(key): no focused Superset terminal to hand off")
+            return
+        }
+        handoffLabel = describeKey(slot: entry.slot)
+        armConfirmation(action)
+    }
+
+    /// APPR confirmed it: transcript → prompt → `agents.run`. Logs one line of sizes
+    /// (`Handoff.logLine`), never the transcript or the prompt.
+    private func runHandoff(_ action: PendingAction) {
+        guard let client = superset?.client else {
+            refuseHandoff("\(handoffLabel): the Superset host client went away")
+            return
+        }
+        let label = handoffLabel
+        let contextChars = model.preferences.launch.handoffContextChars
+        Task { [weak self] in
+            guard let report = await Handoff.run(after: .confirmed(action), host: client, contextChars: contextChars)
+            else { return }
+            Log.write(Handoff.logLine(report, label: label))
+            if case .launched = report { return }
+            _ = self?.play(show: Shows.refused(), priority: .confirm)
+        }
+    }
+
+    private func refuseHandoff(_ why: String) {
+        Log.write("handoff refused — \(why)")
+        _ = play(show: Shows.refused(), priority: .confirm)
+    }
+
+    // MARK: - NEW (F5)
+
+    /**
+     NEW: a bare agent (`launch.newAgent`, prompt empty) in the Superset workspace in
+     front — no confirmation (D2), but a cooldown so one bouncy press never opens two.
+     Outside a Superset workspace it does nothing and blinks the ring amber.
+     */
+    private func launchNewAgent(key: String) {
+        guard let client = superset?.client else {
+            Log.write("key \(key): NEW needs the Superset host client (off or not connected)")
+            _ = play(show: Shows.noWorkspace(), priority: .confirm)
+            return
+        }
+        // The workspace in front, whatever the pad's scope: with Superset in front the
+        // newest focus signal names it.
+        let context: BoardContext = front == .superset
+            ? supersetFocus.winner.map { .superset(workspaceID: $0.workspaceID) } ?? .all
+            : .all
+        let agent = model.preferences.launch.newAgent
+        guard let call = LaunchPolicy.newAgent(context: context, agent: agent) else {
+            Log.write("key \(key): NEW — no Superset workspace in front")
+            _ = play(show: Shows.noWorkspace(), priority: .confirm)
+            return
+        }
+        guard launchCooldown.admit(now: Date()) else {
+            Log.write("key \(key): NEW ignored — inside the \(launchCooldownMs)ms cooldown")
+            return
+        }
+        let workspace: String = if case let .superset(id) = context { String(id.prefix(8)) } else { "?" }
+        Log.write("key \(key): launching \(agent) in workspace \(workspace)")
+        Task { [weak self] in
+            do {
+                try await client.perform(call)
+                Log.write("key \(key): \(agent) launched in workspace \(workspace)")
+            } catch {
+                Log.write("key \(key): launch failed — \(Self.describe(error))")
+                _ = self?.play(show: Shows.noWorkspace(), priority: .confirm)
+            }
+        }
+    }
+
+    /// An error for the log: the client's own cases, or a code — never a description
+    /// that could carry the endpoint.
+    private static func describe(_ error: Error) -> String {
+        if let error = error as? SupersetClientError { return "\(error)" }
+        if let error = error as? URLError { return "network error \(error.code.rawValue)" }
+        return "error \((error as NSError).code)"
+    }
+
+    /**
+     A registry slot as the person at the pad sees it: "key 2 · my-app".
+
+     The slot number is internal — in a workspace context key 2 can be slot 5 — so
+     the log and the popover speak in keys, with the workspace (or folder) to tell
+     two boards apart. A session the pad is not showing says so.
+     */
+    private func describeKey(slot: Int) -> String {
+        guard let entry = registry.occupancy().first(where: { $0.slot == slot })?.entry else {
+            return "slot \(slot)"
+        }
+        let key = padView.keys.first { $0.value == entry.sessionID }?.key
+        return SlotView.keyLabel(padKey: key, place: place(of: entry))
+    }
+
+    /// The workspace's folder for a Superset session, else the session's own folder.
+    private func place(of entry: SessionRegistry.Entry) -> String? {
+        if let workspace = PadView.workspace(of: entry, worktrees: supersetWorktrees),
+           let path = supersetWorktrees[workspace] {
+            return URL(fileURLWithPath: path).lastPathComponent
+        }
+        return entry.cwd.map { URL(fileURLWithPath: $0).lastPathComponent }
     }
 
     /// Re-read the tab titles, and republish only if one changed.
@@ -883,7 +1943,9 @@ final class BoardController: ObservableObject {
         }
 
         let mode = Ambient.Mode(rawValue: model.preferences.ambient.mode) ?? .events
-        let states = registry.occupancy().map { $0.entry?.state }
+        // The whole registry, whatever the keys are showing: a prompt in another
+        // workspace must still be able to light the ring.
+        let states = padView.ringStates
         guard let resolved = Ambient.resolve(
             states: states, mode: mode, appearances: model.appearances,
             // Without this, `fixed` resolves to nothing and the ring is silently dark —
@@ -991,9 +2053,57 @@ final class BoardController: ObservableObject {
             guard let self else { return }
             try? await Task.sleep(for: .seconds(self.encoderClick.threshold))
             guard !Task.isCancelled, self.encoderClick.shouldFireLong() else { return }
-            guard let action = self.model.preferences.encoder.longPress else { return }
+            // Per app: with Superset in front the hold opens its command palette.
+            let long = self.controlMap.encoderLong
+            guard let action = long.action else { return }
             Log.write("key ENC: held past \(Int(self.encoderClick.threshold * 1000))ms")
-            self.perform(action, key: "ENC.long")
+            self.perform(action, key: long.payloadKey)
+        }
+    }
+
+    /**
+     An action cap with a long press went down (F2).
+
+     Like the dial, the hold fires *while still held*, once the threshold passes —
+     not on release. The timer wakes a little past the threshold (`holdPollDelay`) so
+     a sleep that ends a hair early does not read as "not yet" and leave the hold to
+     the release. The tap, when it was short, fires on release.
+     */
+    private func actionPressed(_ key: String) {
+        _ = pressTracker.press(key, hasLongBinding: true, now: Date())
+        holdTasks[key]?.cancel()
+        let delay = controlMap.holdPollDelay
+        holdTasks[key] = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(delay * 1000)))
+            guard let self, !Task.isCancelled else { return }
+            self.holdTasks[key] = nil
+            while let emit = self.pressTracker.poll(now: Date()) {
+                self.fire(emit, stillDown: true)
+            }
+        }
+    }
+
+    /// Any key came back up. Only a cap the tracker is timing resolves here: a tap if
+    /// it was short, or a hold whose timer ran late.
+    private func actionReleased(_ key: String) {
+        guard let emit = pressTracker.release(key, now: Date()) else { return }
+        holdTasks.removeValue(forKey: key)?.cancel()
+        fire(emit, stillDown: false)
+    }
+
+    private func fire(_ emit: ActionPressTracker.Emit, stillDown: Bool) {
+        switch emit {
+        case let .tap(cap):
+            guard let action = controlMap.taps[cap] else {
+                Log.write("key \(cap): unassigned")
+                return
+            }
+            // Already released: nothing can be held any more.
+            perform(action, key: cap, holdKey: nil)
+        case let .hold(cap):
+            guard let hold = controlMap.hold(cap), let action = hold.action else { return }
+            Log.write("key \(cap): held past \(Int(controlMap.longPressThreshold * 1000))ms")
+            perform(action, key: hold.payloadKey, holdKey: stillDown ? cap : nil)
         }
     }
 
@@ -1066,16 +2176,9 @@ final class BoardController: ObservableObject {
     /// Every key dark, without forgetting anything.
     private func allKeysOff() async {
         guard deviceIsOpen else { return }
-        let calibration = model.calibration
-        var batch: [[Data]] = []
-        for slot in 1...BoardLayout.slotCount {
-            guard let physical = calibration.physicalSlot(for: slot) else { continue }
-            if let thread = try? CodexProtocol.ThreadState(
-                physicalSlot: physical, color: RGB(0), brightness: 0, effect: .off, speed: 0
-            ) {
-                batch.append(device.prepare(threads: [thread]))
-            }
-        }
+        let dark = Dictionary(uniqueKeysWithValues: (1...BoardLayout.slotCount).map { ($0, Appearance.off) })
+        let batch = PadPaint.keyBatch(dark, calibration: model.calibration, transport: device).batch
+        guard !batch.isEmpty else { return }
         try? await device.write(batch: batch)
     }
 
@@ -1084,6 +2187,8 @@ final class BoardController: ObservableObject {
     func stop() {
         reassertTask?.cancel()
         reassertTask = nil
+        overflowWinkTask?.cancel()
+        overflowWinkTask = nil
         // Before anything else: a key left logically down outlives this process and
         // corrupts every keystroke on the machine afterwards.
         pushToTalk.releaseIfHeld()
@@ -1092,7 +2197,246 @@ final class BoardController: ObservableObject {
         // because a crash never reaches this line.
         RegistryStore.save(registry)
         closeDeviceSync()
+        tearDownSuperset(releaseBusSessions: false)
         Task { await hooks.stop() }
+    }
+
+    // MARK: - Superset host-service (F3)
+
+    /**
+     Bring the connection in line with `superset.*`: build it when `hostClient` is
+     `auto`, drop it when `off`, rebuild it when any of its settings changed. Called at
+     launch and on every settings edit, so the switch works live. A no-op when nothing
+     changed — an unrelated edit must not drop the socket.
+     */
+    private func configureSuperset(force: Bool = false) {
+        let config = model.preferences.superset
+        guard config.hostClient == .auto else {
+            if superset != nil {
+                tearDownSuperset(releaseBusSessions: true)
+                Log.write("superset: host client off — hooks and deep links only")
+            }
+            model.supersetLink = .off
+            return
+        }
+        if !force, superset?.config == config { return }
+        tearDownSuperset(releaseBusSessions: false)
+
+        lifecycle = LifecycleMapper(
+            startDebounce: Double(config.startDebounceMs) / 1000,
+            dedupeWindow: Double(config.dedupeWindowMs) / 1000
+        )
+        let transport = SupersetConnection()
+        // The manifest loader registers the token with the log redactor on every read,
+        // before anything can log (SupersetConnection.loadManifest).
+        let client = SupersetConnection.makeClient(config, transport: transport)
+        let events: SupersetEventStream? = config.events
+            ? transport.events(orgID: config.orgID) { message in
+                Task { @MainActor [weak self] in self?.handleBus(message) }
+            }
+            : nil
+        superset = SupersetLink(config: config, transport: transport, client: client, events: events)
+        model.supersetLink = .searching
+        Log.write("superset: host client on (events \(config.events ? "on" : "off"), tested \(config.testedVersion))")
+        if let events { Task { await events.start() } }
+        startSupersetHealth(client)
+    }
+
+    /// Drop the connection. Bus sessions lose their only source of truth with it, so
+    /// switching the client off also gives their keys back.
+    private func tearDownSuperset(releaseBusSessions: Bool) {
+        supersetHealthTask?.cancel()
+        supersetHealthTask = nil
+        lifecycleFlushTask?.cancel()
+        lifecycleFlushTask = nil
+        bindingsRefreshTask?.cancel()
+        bindingsRefreshTask = nil
+        if let events = superset?.events { Task { await events.stop() } }
+        superset = nil
+        if releaseBusSessions,
+           registry.syncBus(bindings: [], hookedAgents: Self.hookedAgents) {
+            Log.write("superset: bus sessions released (client off)")
+            publish()
+            Task { await paint() }
+        }
+    }
+
+    /// "Reconnect" in the Superset pane: forget the socket and the manifest, start over.
+    func reconnectSuperset() {
+        Log.write("superset: reconnect requested")
+        configureSuperset(force: true)
+    }
+
+    /**
+     `health.check` on a loop: the link state the pane shows, the version gate, and
+     the moment to (re)read `terminalAgents.list` — at launch (reconciliation) and
+     whenever the link comes back (Superset restarted on a new port).
+     */
+    private func startSupersetHealth(_ client: SupersetHostClient) {
+        supersetHealthTask = Task { [weak self] in
+            var wasConnected = false
+            while !Task.isCancelled {
+                let version = try? await client.health()
+                let state = await client.state
+                guard let self, !Task.isCancelled else { return }
+                self.model.supersetLink = state
+                self.lastLinkLog = Log.changed("superset link", last: self.lastLinkLog, to: Self.describe(state))
+                let connected = version != nil
+                if connected, !wasConnected {
+                    await self.syncWithSuperset(client, launch: !self.reconciledAtLaunch)
+                    self.reconciledAtLaunch = true
+                }
+                wasConnected = connected
+                try? await Task.sleep(for: .seconds(connected ? 30 : 5))
+            }
+        }
+    }
+
+    private static func describe(_ state: SupersetLinkState) -> String {
+        switch state {
+        case .off: "off"
+        case .searching: "searching"
+        case let .connected(version, readOnly): "connected \(version)\(readOnly ? " (read-only)" : "")"
+        case let .versionMismatch(found, tested): "version \(found) ≠ tested \(tested) — read-only"
+        case let .unreachable(reason): "unreachable (\(reason))"
+        }
+    }
+
+    /**
+     Read `terminalAgents.list` and fold it into the board: at launch, confirm or end
+     what the file restored (`Reconciler`); every time, give bus sessions (agents
+     without our hooks) a key or take it back (`SessionRegistry.syncBus`).
+     */
+    private func syncWithSuperset(_ client: SupersetHostClient, launch: Bool) async {
+        guard let bindings = try? await client.agents(workspaceID: nil) else {
+            Log.write("superset: terminalAgents.list failed — board left as it is")
+            return
+        }
+        var summary: [String] = ["\(bindings.count) binding(s)"]
+        if launch, model.preferences.superset.reconcileOnLaunch {
+            let unconfirmed = registry.entries.filter(\.isUnconfirmed)
+                .map { (sessionID: $0.sessionID, terminalID: $0.supersetTerminalID) }
+            let outcomes = Reconciler.reconcile(unconfirmed: unconfirmed, bindings: bindings)
+            registry.apply(outcomes)
+            let ended = outcomes.filter { if case .end = $0 { true } else { false } }.count
+            summary.append("reconciled \(outcomes.count - ended) confirmed, \(ended) ended")
+        }
+        if registry.syncBus(bindings: bindings, hookedAgents: Self.hookedAgents) {
+            fillBusSessionFolders()
+            summary.append("bus sessions updated")
+        }
+        Log.write("superset: synced — " + summary.joined(separator: ", "))
+        publish()
+        requestBusPaint()
+    }
+
+    /// A bus session has no cwd of its own; its workspace's worktree names it in the
+    /// popover.
+    private func fillBusSessionFolders() {
+        for entry in registry.entries where entry.isBusBorn && entry.cwd == nil {
+            guard let workspace = entry.supersetWorkspaceID,
+                  let path = supersetWorktrees[workspace] ?? openSupersetDB()?.worktrees()[workspace]
+            else { continue }
+            registry.enrich(sessionID: entry.sessionID, cwd: path)
+        }
+    }
+
+    /**
+     One message from `/events`. Logged by type and terminal only — never `preview`,
+     which the decoder already dropped.
+     */
+    private func handleBus(_ message: SupersetBus.Message) {
+        guard superset != nil else { return }
+        switch message {
+        case let .lifecycle(event):
+            Log.write("bus \(event.type.rawValue) \(event.agent) [\(event.terminalID.prefix(8))]")
+            if event.type == .detached {
+                if let slot = registry.releaseBus(terminalID: event.terminalID) {
+                    Log.write("bus: freed slot \(slot) — \(event.agent) detached")
+                    publish()
+                    requestBusPaint()
+                }
+                return
+            }
+            if let change = lifecycle.ingest(event, from: .bus, now: Date()) {
+                applyBusChange(change)
+            }
+            if event.type == .start { scheduleLifecycleFlush() }
+        case .bindingsChanged:
+            // Says something changed, not what: re-read the list, once per burst.
+            bindingsRefreshTask?.cancel()
+            bindingsRefreshTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled, let client = self.superset?.client else { return }
+                await self.syncWithSuperset(client, launch: false)
+            }
+        case .other:
+            break
+        }
+    }
+
+    private func applyBusChange(_ change: LifecycleMapper.Change) {
+        let previous = registry.entry(forTerminal: change.terminalID)
+        let outcome = registry.applyBus(
+            change, mayClaim: !Self.hookedAgents.contains(change.agent)
+        )
+        switch outcome {
+        case .ignored:
+            return
+        case .noSlot:
+            Log.write("bus: no key for \(change.agent) [\(change.terminalID.prefix(8))] — every key is asking for something")
+            return
+        case let .claimed(slot):
+            Log.write("bus: \(change.agent) [\(change.terminalID.prefix(8))] took slot \(slot) as \(change.state.rawValue)")
+            fillBusSessionFolders()
+        case .updated:
+            break
+        }
+        guard let sessionID = registry.entry(forTerminal: change.terminalID)?.sessionID else { return }
+        publish()
+        fireLap(from: previous?.state, sessionID: sessionID)
+        interruptTransition(from: previous?.state, sessionID: sessionID)
+        requestBusPaint()
+    }
+
+    /// Held `Start`s fall due after the debounce; one timer serves them all.
+    private func scheduleLifecycleFlush() {
+        guard lifecycleFlushTask == nil else { return }
+        let wait = Double(model.preferences.superset.startDebounceMs) / 1000 + 0.02
+        lifecycleFlushTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(wait * 1000)))
+            guard let self, !Task.isCancelled else { return }
+            self.lifecycleFlushTask = nil
+            for change in self.lifecycle.flush(now: Date()) { self.applyBusChange(change) }
+        }
+    }
+
+    /**
+     A repaint asked for by the bus, through `PadWriteCoalescer`: the first goes out at
+     once, a burst inside `padWriteCoalesceMs` collapses into one write at the end of
+     the window. A change that leaves the keys and ring as they were costs nothing.
+
+     Only the bus goes through here. Hooks, previews and the resident re-assert paint
+     directly, as before — the re-assert re-sends the same bytes on purpose.
+     */
+    private func requestBusPaint() {
+        padView = composePadView()
+        if keyLooks().mapValues(\.look) == lastPaintedLooks, padView.ringStates == lastPaintedRing { return }
+        // A fresh payload per request: the coalescer only paces here; whether the
+        // write is redundant was just decided against what the pad last received.
+        busPaintSeq += 1
+        if padCoalescer.offer(Data("\(busPaintSeq)".utf8), now: Date()) != nil {
+            Task { await paint() }
+            return
+        }
+        guard busDrainTask == nil else { return }
+        let wait = Double(padCoalesceMs) / 1000 + 0.01
+        busDrainTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(Int(wait * 1000)))
+            guard let self, !Task.isCancelled else { return }
+            self.busDrainTask = nil
+            if self.padCoalescer.drain(now: Date()) != nil { await self.paint() }
+        }
     }
 
     // MARK: - hooks
@@ -1201,9 +2545,42 @@ final class BoardController: ObservableObject {
         // anything that declines says so on its own line.
         Log.write("hook \(event.name) maps to \(state.rawValue) [\(sessionID.prefix(8))]")
 
+        // A hook from a Superset terminal: the bus reports the same moment, so it goes
+        // through the lifecycle mapper too and the bus echo is counted once (F3). And
+        // if the bus spoke first and gave the terminal a key, this session takes it.
+        if let terminal = event.supersetTerminalID {
+            if registry.promoteBusEntry(terminalID: terminal, to: sessionID) {
+                Log.write("hook \(event.name): took over the key the bus gave [\(terminal.prefix(8))]")
+            }
+            if let type = LifecycleType.forHookState(state) {
+                _ = lifecycle.ingest(
+                    LifecycleEvent(
+                        type: type, terminalID: terminal,
+                        workspaceID: event.supersetWorkspaceID ?? "",
+                        agent: event.harness ?? Harness.claudeCode.id, at: Date()
+                    ),
+                    from: .hook, now: Date()
+                )
+            }
+        }
+
         // Dictation ends when what it was dictating is sent.
         if event.name == "UserPromptSubmit", voiceIsActive {
             setVoice(false, why: "prompt submitted")
+        }
+
+        /*
+         A prompt typed into a Superset session says which workspace you are in.
+
+         Except the one nobody typed: when a background subagent finishes, the CLI
+         injects a `UserPromptSubmit` whose prompt begins `<task-notification>`, from
+         whatever workspace that session is in — which is not a signal about you.
+        */
+        if event.name == "UserPromptSubmit",
+           !((event.raw["prompt"] as? String)?.hasPrefix("<task-notification>") ?? false),
+           let workspace = event.supersetWorkspaceID
+               ?? registry.entry(forSession: sessionID)?.supersetWorkspaceID {
+            noteSupersetSignal(.init(workspaceID: workspace, at: Date(), source: .prompt))
         }
 
         /*
@@ -1296,9 +2673,15 @@ final class BoardController: ObservableObject {
             entrypoint: event.entrypoint
         ) {
             Log.write("hook \(event.name): matched a running session already on the board")
+            registry.enrich(
+                sessionID: sessionID,
+                supersetWorkspaceID: event.supersetWorkspaceID,
+                supersetTerminalID: event.supersetTerminalID
+            )
             registry.setState(sessionID: sessionID, to: state, pendingTool: event.toolName)
             publish()
             fireLap(from: previousState, sessionID: sessionID)
+            interruptTransition(from: previousState, sessionID: sessionID)
             await paint()
             return
         }
@@ -1347,7 +2730,9 @@ final class BoardController: ObservableObject {
             transcriptPath: transcript,
             entrypoint: event.entrypoint,
             tty: hookPID.flatMap(Self.tty(forPID:)),
-            pid: hookPID
+            pid: hookPID,
+            supersetWorkspaceID: event.supersetWorkspaceID,
+            supersetTerminalID: event.supersetTerminalID
         ) {
             // Logged once per session, when it happens: an unnamed row is otherwise
             // indistinguishable from a session that genuinely has no transcript.
@@ -1369,6 +2754,13 @@ final class BoardController: ObservableObject {
                     ?? SessionTranscript.locate(sessionID: sessionID),
                 entrypoint: event.entrypoint,
                 state: state
+            )
+            // The enrich above ran before this session had an entry, so the Superset
+            // workspace is recorded here for a fresh claim.
+            registry.enrich(
+                sessionID: sessionID,
+                supersetWorkspaceID: event.supersetWorkspaceID,
+                supersetTerminalID: event.supersetTerminalID
             )
         } else if EventMapper.clearsAttention.contains(event.name) {
             /*
@@ -1463,6 +2855,7 @@ final class BoardController: ObservableObject {
 
         publish()
         fireLap(from: previousState, sessionID: sessionID)
+        interruptTransition(from: previousState, sessionID: sessionID)
         await paint()
     }
 
@@ -1481,6 +2874,19 @@ final class BoardController: ObservableObject {
         guard let show = Shows.show(named: name) else { return }
         Log.write("lap \(name): \(previous?.rawValue ?? "none") -> \(current?.rawValue ?? "none")")
         play(show: show)
+    }
+
+    /**
+     A session starting to need a human stops a workspace transition mid-count.
+
+     The cascade holds the paint lane, so the hook's own repaint would otherwise wait
+     for it to finish. Cutting it short costs the animation; waiting could cost the
+     prompt half a second of being dark on a key that has not been counted in yet.
+     */
+    private func interruptTransition(from previous: SessionState?, sessionID: String) {
+        let current = registry.entry(forSession: sessionID)?.state
+        guard current != previous, TransitionPlanner.role(of: current) == .attention else { return }
+        transitions.interrupt()
     }
 
     /// The tty of a live process, so a key can raise the right tab later. Captured at
@@ -1723,44 +3129,33 @@ final class BoardController: ObservableObject {
             // Silence the key backlight, or it floods the pad and buries per-key
             // color. Skipped entirely while a show owns the ring: this call carries
             // the ring config too, so sending it mid-show cuts the animation off.
+            padView = composePadView()
             if Date() >= ringBusyUntil {
                 batch.append(device.prepare(
                     lighting: CodexProtocol.LightingConfig(keys: .off, ambient: ambientSide())
                 ))
             }
 
-            for (slot, entry) in registry.occupancy() {
-                // A slot the calibration does not cover is skipped rather than guessed.
-                // Counted, because "every key went dark" and "the app wrote every key
-                // and the pad ignored it" look identical from the outside and have
-                // completely different causes.
-                guard let physical = calibration.physicalSlot(for: slot) else {
-                    skipped += 1
-                    continue
-                }
-                // A free slot and a finished session both mean "nothing to look at".
-                // `viewing` is applied here rather than stored — see Viewing.
-                let viewing = entry.map { isFocused($0, name: name(of: $0)) } ?? false
-                let state = entry.map { Viewing.display($0.state, isFocused: viewing) } ?? .ended
-                let appearance = Viewing.appearance(
-                    state,
-                    isFocused: viewing,
-                    from: model.appearances
-                )
-                let effect = CodexProtocol.Effect(rawValue: appearance.effect.deviceCode) ?? .solid
-                let thread = try CodexProtocol.ThreadState(
-                    physicalSlot: physical,
-                    color: appearance.color,
-                    brightness: appearance.brightness,
-                    effect: effect,
-                    speed: appearance.speed
-                )
-                batch.append(device.prepare(threads: [thread]))
-                written += 1
-            }
+            // Pad keys, not registry slots: in a workspace context the keys are that
+            // workspace's sessions packed from 1 (see `PadView`); in `.all` the two
+            // are the same thing. Every key is written — a key with no session is
+            // painted dark, or it would keep the previous workspace's light. All six
+            // in one call: see `PadPaint`.
+            //
+            // A slot the calibration does not cover is skipped rather than guessed.
+            // Counted, because "every key went dark" and "the app wrote every key and
+            // the pad ignored it" look identical from the outside and have completely
+            // different causes.
+            let looks = keyLooks().mapValues(\.look)
+            let keys = PadPaint.keyBatch(looks, calibration: calibration, transport: device)
+            batch += keys.batch
+            written = keys.written
+            skipped = keys.skipped
 
             try await device.write(batch: batch)
             painted = (written, skipped)
+            lastPaintedLooks = looks
+            lastPaintedRing = padView.ringStates
         } catch {
             // Never throw out of the loop: a failed repaint is a missed light, but a
             // dead loop is a board that stays wrong until someone restarts the app.
@@ -1814,7 +3209,8 @@ final class BoardController: ObservableObject {
     /**
      Play a ring animation.
 
-     One at a time — overlapping shows fight over a single light. The board keeps
+     One at a time — overlapping shows fight over a single light — and by rank: a
+     higher one cuts a lower one off (`ShowArbiter`). The board keeps
      painting underneath: the ring and the six keys are separate RPCs, so status is
      never suspended for a show, only the ring is borrowed.
      */
@@ -1850,14 +3246,32 @@ final class BoardController: ObservableObject {
         player.start(preferences: model.preferences)
     }
 
-    func play(show: Show) {
-        guard runningShow == nil else {
-            Log.write("show \(show.name): ignored, \(runningShow ?? "another") is playing")
-            return
+    /**
+     - Parameter priority: defaults to the show's own rank (`ShowPriority.of`).
+     - Returns: whether it started. A lower-ranked show than the one playing — or any
+       show while dictation owns the ring — does not.
+     */
+    @discardableResult
+    func play(show: Show, priority: ShowPriority? = nil) -> Bool {
+        let rank = priority ?? ShowPriority.of(showNamed: show.name)
+        let decision = ShowArbiter.decide(
+            incoming: rank,
+            running: runningShow == nil ? nil : runningShowPriority,
+            voiceActive: voiceOwnsRing
+        )
+        guard decision != .ignore else {
+            Log.write("show \(show.name): ignored, \(runningShow ?? "dictation") owns the ring")
+            return false
         }
-        guard deviceIsOpen else { return }
+        guard deviceIsOpen else { return false }
+        if decision == .preempt {
+            Log.write("show \(show.name): cuts off \(runningShow ?? "another")")
+        }
 
+        showToken += 1
+        let token = showToken
         runningShow = show.name
+        runningShowPriority = rank
         model.runningShow = show.name
         ringBusyUntil = Date().addingTimeInterval(show.duration.seconds + 0.8)
         Log.write("show \(show.name): starting (\(Int(show.duration.seconds * 1000))ms)")
@@ -1865,23 +3279,27 @@ final class BoardController: ObservableObject {
         Task { [weak self] in
             guard let self else { return }
             for step in show.steps {
-                guard self.runningShow == show.name else { break }
+                guard self.showToken == token, self.runningShow == show.name else { break }
                 // Asserted once, then left alone for the step's duration.
                 try? await self.device.send(
                     lighting: CodexProtocol.LightingConfig(keys: .off, ambient: step.side)
                 )
                 try? await Task.sleep(for: .milliseconds(step.milliseconds))
             }
+            // Cut off: the show that replaced it owns the ring, and its hand-back.
+            guard self.showToken == token else { return }
             // Hand the ring back rather than leaving whatever the last step wrote.
             try? await self.device.send(
                 lighting: CodexProtocol.LightingConfig(keys: .off, ambient: .off)
             )
             self.runningShow = nil
+            self.runningShowPriority = nil
             self.model.runningShow = nil
             self.ringBusyUntil = .distantPast
             Log.write("show \(show.name): done")
             await self.paint()
         }
+        return true
     }
 
     /// Jump from a click in the popover, as opposed to a key press.
@@ -1889,6 +3307,7 @@ final class BoardController: ObservableObject {
 
     func stopShow() {
         runningShow = nil
+        runningShowPriority = nil
         ringBusyUntil = .distantPast
     }
 
@@ -1921,6 +3340,8 @@ final class BoardController: ObservableObject {
     // MARK: - publishing
 
     private func publish() {
+        // First: each row names the pad key its session is on.
+        padView = composePadView()
         let slots = registry.occupancy().map { slot, entry -> SlotView in
             guard let entry else { return SlotView(slot: slot) }
             // What you asked for, falling back to the folder. Two sessions in one repo
@@ -1952,12 +3373,20 @@ final class BoardController: ObservableObject {
                 entrypoint: entry.entrypoint,
                 isNamed: name != nil,
                 cwd: entry.cwd,
+                supersetWorkspaceID: entry.supersetWorkspaceID,
+                supersetTerminalID: entry.supersetTerminalID,
                 // The same resolution the pad gets, from the same configured colors, so
                 // the dot and the swatch cannot drift from the key.
-                emitting: Viewing.appearance(shown, isFocused: viewing, from: model.appearances),
-                isFocused: viewing
+                emitting: entry.isUnconfirmed && !viewing
+                    ? model.preferences.unconfirmedAppearance
+                    : Viewing.appearance(shown, isFocused: viewing, from: model.appearances),
+                isFocused: viewing,
+                padKey: padView.keys.first { $0.value == entry.sessionID }?.key,
+                place: place(of: entry),
+                isUnconfirmed: entry.isUnconfirmed
             )
         }
+        // The popover lists every session; only the pad is filtered.
         model.apply(slots: slots)
         RegistryStore.save(registry)
     }
@@ -1973,5 +3402,17 @@ final class BoardController: ObservableObject {
         if seconds < 3600 { return "\(seconds / 60)m" }
         if seconds < 86400 { return "\(seconds / 3600)h" }
         return "\(seconds / 86400)d"
+    }
+}
+
+/// Runs a callback at most once, however many exits reach it.
+@MainActor
+private final class CallOnce {
+    private var body: (@MainActor () -> Void)?
+    init(_ body: (@MainActor () -> Void)?) { self.body = body }
+    func run() {
+        let once = body
+        body = nil
+        once?()
     }
 }

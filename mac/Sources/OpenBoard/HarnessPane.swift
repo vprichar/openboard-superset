@@ -75,7 +75,7 @@ struct HarnessPane: View {
                 harnessCard
 
                 if !installedIDs.contains(harness.id) {
-                    Text("Not found on this Mac.")
+                    Text(tr("No se encontró en este Mac."))
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }
@@ -85,7 +85,7 @@ struct HarnessPane: View {
                     // will never appear on your board is not a footnote.
                     VStack(alignment: .leading, spacing: 4) {
                         ForEach(harness.limitations, id: \.self) { limitation in
-                            Text(limitation)
+                            Text(tr(limitation))
                                 .font(.system(size: 11.5))
                                 .foregroundStyle(Color(RGB(0xFF6A00)))
                                 .fixedSize(horizontal: false, vertical: true)
@@ -96,24 +96,24 @@ struct HarnessPane: View {
                 // One section, because they were one thing described twice: a hook is
                 // the event, and "is it wired" and "what does it mean" are two columns
                 // of the same answer rather than two headings.
-                PaneHeader("Events", "What a session reports, and whether it reaches the board.")
+                PaneHeader(tr("Eventos"), tr("Qué informa una sesión y si llega al tablero."))
                 eventsSection
 
                 if harness.id == Harness.claudeCode.id {
                     // Claude Code's voice-mode setting and any action-key binding must
                     // agree, or the pad tap silently records nothing (hold mode) or
                     // sticks Space down forever (tap mode with voice-talk).
-                    PaneHeader("Voice", "Whether the pad's voice key matches Claude's mode.")
+                    PaneHeader(tr("Voz"), tr("Si la tecla de voz del pad coincide con el modo de Claude."))
                     voiceSection
 
                     // Notification subtypes are Claude Code's alone. Showing this table
                     // under Hermes would be four pickers editing settings its events
                     // never consult.
-                    PaneHeader("Notifications", "Which notification subtype means which state.")
+                    PaneHeader(tr("Notificaciones"), tr("Qué estado corresponde a cada subtipo de notificación."))
                     notificationSection
                 }
 
-                PaneHeader("Where it works", "How a session is found, and what its key does.")
+                PaneHeader(tr("Dónde funciona"), tr("Cómo se detecta una sesión y qué hace su tecla."))
                 surfaceTable
                 }
             }
@@ -146,8 +146,8 @@ struct HarnessPane: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(harness.name).font(.system(size: 13, weight: .semibold))
                     Text(installedIDs.contains(harness.id)
-                        ? "Found on this Mac, and it has never reported to the board."
-                        : "Not found on this Mac.")
+                        ? tr("Está en este Mac, pero nunca ha informado al tablero.")
+                        : tr("No se encontró en este Mac."))
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                 }
@@ -160,7 +160,7 @@ struct HarnessPane: View {
             if !harness.limitations.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     ForEach(harness.limitations, id: \.self) { limitation in
-                        Text(limitation)
+                        Text(tr(limitation))
                             .font(.system(size: 11.5))
                             .foregroundStyle(Color(RGB(0xFF6A00)))
                             .fixedSize(horizontal: false, vertical: true)
@@ -168,7 +168,7 @@ struct HarnessPane: View {
                 }
             }
 
-            PaneHeader("Set it up", "Then send it something — the rest fills in from there.")
+            PaneHeader(tr("Configurar"), tr("Después envíale algo — el resto se completa a partir de ahí."))
             switch harness.setup {
             case .automatic:
                 VStack(spacing: 0) { wiringRow }
@@ -196,7 +196,7 @@ struct HarnessPane: View {
                 .frame(width: 9, height: 9)
             VStack(alignment: .leading, spacing: 2) {
                 Text(harness.name).font(.system(size: 13, weight: .semibold))
-                Text(isConnected ? "Connected" : "Not connected")
+                Text(isConnected ? tr("Conectado") : tr("Sin conexión"))
                     .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
             }
@@ -230,10 +230,10 @@ struct HarnessPane: View {
                     .font(.system(size: 11.5).monospaced())
                     .textSelection(.enabled)
                 Spacer(minLength: 0)
-                Button("Copy") {
+                Button(tr("Copiar")) {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(resolved(snippet), forType: .string)
-                    hookNote = "Copied."
+                    hookNote = tr("Copiado.")
                 }
                 .controlSize(.small)
             }
@@ -299,18 +299,20 @@ struct HarnessPane: View {
                 .fill(hooks.isHealthy ? Color(RGB(0x09B821)) : Color(RGB(0xFF6A00)))
                 .frame(width: 8, height: 8)
             Text(hooks.isHealthy
-                ? "All \(harness.events.count) wired to this build."
+                ? tr("Los %ld eventos conectados a esta compilación.", harness.events.count)
                 : hooks.settingsExists
-                    ? "\(hooks.problems.count) of \(harness.events.count) need attention."
-                    : "No settings file found.")
+                    ? (hooks.problems.count == 1
+                        ? tr("%ld de %ld requiere atención.", hooks.problems.count, harness.events.count)
+                        : tr("%ld de %ld requieren atención.", hooks.problems.count, harness.events.count))
+                    : tr("No se encontró el archivo de ajustes."))
                 .font(.system(size: 12))
             Spacer(minLength: 0)
-            Button("Re-check", action: refresh).controlSize(.small)
+            Button(tr("Comprobar ahora"), action: refresh).controlSize(.small)
             if !hooks.isHealthy {
-                Button("Repair") {
+                Button(tr("Reparar")) {
                     do {
                         try HookInstall.install(command: HookInstall.hookCommandPath())
-                        hookNote = "Wired. A backup of the previous file is beside it."
+                        hookNote = tr("Conectado. Hay una copia de seguridad del archivo anterior a su lado.")
                     } catch {
                         hookNote = error.localizedDescription
                     }
@@ -341,7 +343,7 @@ struct HarnessPane: View {
                     ) {
                         StateChip(state: state)
                     } else {
-                        Text("depends on the subtype")
+                        Text(tr("depende del subtipo"))
                             .font(.system(size: 11)).foregroundStyle(.tertiary)
                     }
                     Spacer(minLength: 0)
@@ -366,7 +368,7 @@ struct HarnessPane: View {
                     Text(kind).font(.system(size: 11.5).monospaced())
                     Spacer(minLength: 12)
                     Picker("", selection: notificationBinding(kind)) {
-                        Text("unmapped").tag(SessionState?.none)
+                        Text(tr("sin asignar")).tag(SessionState?.none)
                         ForEach(
                             [SessionState.awaiting, .stalled, .working, .error, .idle, .done],
                             id: \.self
@@ -404,14 +406,14 @@ struct HarnessPane: View {
         let claudeMode = ClaudeVoice.readMode()
         return VStack(spacing: 0) {
             HStack(spacing: 10) {
-                Text("Claude's mode")
+                Text(tr("Modo de Claude"))
                     .font(.system(size: 11.5))
                     .frame(width: 150, alignment: .leading)
-                Text(claudeMode ?? "not set")
-                    .font(.system(size: 11.5).monospaced())
+                Text(claudeMode ?? tr("sin definir"))
+                    .font(.system(size: 11.5))
                     .foregroundStyle(claudeMode == nil ? .tertiary : .primary)
                 Spacer(minLength: 0)
-                Text("~/.claude/settings.json")
+                Text(verbatim: "~/.claude/settings.json")
                     .font(.system(size: 10.5).monospaced())
                     .foregroundStyle(.tertiary)
             }
@@ -419,10 +421,10 @@ struct HarnessPane: View {
             Divider().opacity(0.3)
             if bindings.isEmpty {
                 HStack(spacing: 10) {
-                    Text("Pad bindings")
+                    Text(tr("Asignaciones del pad"))
                         .font(.system(size: 11.5))
                         .frame(width: 150, alignment: .leading)
-                    Text("no key bound to a voice action")
+                    Text(tr("ninguna tecla asignada a una acción de voz"))
                         .font(.system(size: 11.5))
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 0)
@@ -503,22 +505,22 @@ struct HarnessPane: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(surface.name).font(.system(size: 12.5, weight: .medium))
                         if let reason = surface.unsupported {
-                            Text(reason)
+                            Text(tr(reason))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         } else {
-                            Text(surface.detection)
+                            Text(tr(surface.detection))
                                 .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                             if isListening {
-                                Text("Key press → \(surface.jump)")
+                                Text(tr("Al pulsar la tecla → %@", tr(surface.jump)))
                                     .font(.system(size: 11))
                                     .foregroundStyle(.tertiary)
                                     .fixedSize(horizontal: false, vertical: true)
                             } else {
-                                Text("Not listening — sessions here get no key.")
+                                Text(tr("Sin escuchar — las sesiones de aquí no reciben tecla."))
                                     .font(.system(size: 11))
                                     .foregroundStyle(.tertiary)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -553,9 +555,9 @@ struct HarnessPane: View {
 
     private func describe(_ status: HookInstall.EventStatus?) -> String {
         switch status {
-        case .missing, nil: "not wired"
-        case .stalePath(let path): "points at a binary that is gone — \(path)"
-        case .otherPath(let path): "points at another install — \(path)"
+        case .missing, nil: tr("sin conectar")
+        case .stalePath(let path): tr("apunta a un binario que ya no existe — %@", path)
+        case .otherPath(let path): tr("apunta a otra instalación — %@", path)
         case .ok: "ok"
         }
     }

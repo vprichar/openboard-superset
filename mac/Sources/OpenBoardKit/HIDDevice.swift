@@ -386,10 +386,10 @@ public final class HIDDevice: @unchecked Sendable {
     /**
      Write several prepared calls under one lock acquisition.
 
-     A board repaint is one rgbcfg plus six thstatus calls. Taking the cross-process
-     lock seven separate times per repaint meant seven chances to collide with another
-     writer — and, while a bug in the lock itself made that fatal, it is wasteful
-     regardless. A repaint is one logical operation and should hold the lock once.
+     A board repaint is one rgbcfg plus one thstatus carrying all six keys (it was six
+     thstatus calls; see `PadPaint`). Taking the cross-process lock once per call
+     meant a chance to collide with another writer each time — and, while a bug in
+     the lock itself made that fatal, it is wasteful regardless. A repaint is one logical operation and should hold the lock once.
      */
     public func write(batch: [[Data]]) async throws {
         guard let device else { throw CodexError.notConnected }

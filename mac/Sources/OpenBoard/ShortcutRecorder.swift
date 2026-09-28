@@ -35,7 +35,7 @@ struct ShortcutRecorder: View {
     @StateObject private var capture = ChordCapture()
 
     var body: some View {
-        Button(capture.isRecording ? "Press keys…" : (shortcut?.label ?? "Record shortcut")) {
+        Button(capture.isRecording ? tr("Pulsa las teclas…") : (shortcut?.label ?? tr("Grabar atajo"))) {
             capture.isRecording ? capture.stop() : capture.start(onRecord)
         }
         .controlSize(.small)
@@ -103,6 +103,7 @@ final class ChordCapture: ObservableObject {
                 stop()
                 return
             }
+            // Named in the interface language at the moment of recording.
             let name = Self.names[code] ?? (event.charactersIgnoringModifiers ?? "").uppercased()
             record(Shortcut(keyCode: code, modifiers: modifiers, key: name))
         case .flagsChanged:
@@ -125,6 +126,8 @@ final class ChordCapture: ObservableObject {
     private static let escape = 53
 
     /// Keys with no printable character, or whose character is not their name.
+    /// Stored in the config as `Shortcut.key`, so English whatever the interface
+    /// language: config holds data, not interface text.
     private static let names: [Int: String] = [
         49: "Space", 36: "Return", 76: "Enter", 48: "Tab", 53: "Escape",
         51: "Delete", 117: "Forward Delete",

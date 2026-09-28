@@ -48,6 +48,13 @@ enum FocusedSurface: Equatable {
  A tab switch is the only case that needs polling, and a second of latency on an
  ambient indicator is imperceptible.
 
+ Superset is polled the same way, for a different question. Its windows name no
+ session, so it never produces a surface; what the poll asks is which *workspace* is in
+ front (`onSupersetPoll`, which reads Superset's host database) — and only while
+ Superset is frontmost, so an app in the background costs nothing. Every activation is
+ also reported (`onFrontmost`), because which app is in front decides whether the pad
+ follows the workspace, keeps the last one, or shows everything.
+
  VS Code was excluded from this for a long time, on the grounds that its windows do not
  say which chat is open and a guess is worse than nothing. That was true of AppleScript
  and is not true of the window title — so it is read here too, and a VS Code chat can
@@ -58,12 +65,20 @@ final class FocusWatcher {
     private static let terminalBundleID = "com.apple.Terminal"
 
     private let onChange: (FocusedSurface) -> Void
+    private let onFrontmost: (String?) -> Void
+    private let onSupersetPoll: () -> Void
     private var pollTask: Task<Void, Never>?
     private var observer: NSObjectProtocol?
     private var last: FocusedSurface?
 
-    init(onChange: @escaping (FocusedSurface) -> Void) {
+    init(
+        onChange: @escaping (FocusedSurface) -> Void,
+        onFrontmost: @escaping (String?) -> Void = { _ in },
+        onSupersetPoll: @escaping () -> Void = {}
+    ) {
         self.onChange = onChange
+        self.onFrontmost = onFrontmost
+        self.onSupersetPoll = onSupersetPoll
     }
 
     func start() {
@@ -90,11 +105,14 @@ final class FocusWatcher {
     private static var readableFrontmost: String? {
         guard let frontmost = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         else { return nil }
-        let readable = [terminalBundleID, Cmux.bundleID, VSCodeWindows.bundleID]
+        let readable = [
+            terminalBundleID, Cmux.bundleID, VSCodeWindows.bundleID, Focus.supersetBundleID,
+        ]
         return readable.contains(frontmost) ? frontmost : nil
     }
 
     private func frontmostChanged() {
+        onFrontmost(NSWorkspace.shared.frontmostApplication?.bundleIdentifier)
         guard Self.readableFrontmost != nil else {
             // Stop asking, and clear the indicator. Leaving it set would keep a key
             // breathing for a window that is no longer in front of you.
@@ -108,6 +126,9 @@ final class FocusWatcher {
             while !Task.isCancelled {
                 guard let self, let frontmost = Self.readableFrontmost else { break }
                 self.publish(await Self.surface(of: frontmost))
+                // Superset has no surface to read, but it does have a workspace, and
+                // switching one raises no notification either.
+                if frontmost == Focus.supersetBundleID { self.onSupersetPoll() }
                 // Only a tab switch can change this without an activation
                 // notification, so a slow poll is enough.
                 try? await Task.sleep(for: .seconds(1))
@@ -129,6 +150,8 @@ final class FocusWatcher {
         case VSCodeWindows.bundleID:
             guard let title = await VSCodeWindows.focusedTitle() else { return .elsewhere }
             return .vscode(windowTitle: title)
+        // Superset: no per-session handle (see `onSupersetPoll`), so nothing is
+        // "being viewed" — the same answer it got before it was polled at all.
         default:
             return .elsewhere
         }

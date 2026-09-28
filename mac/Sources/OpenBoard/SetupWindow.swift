@@ -44,7 +44,7 @@ final class SetupWindowController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        created.title = "Set up OpenBoard"
+        created.title = tr("Configurar OpenBoard")
         created.titlebarAppearsTransparent = true
         created.isMovableByWindowBackground = true
         created.delegate = self

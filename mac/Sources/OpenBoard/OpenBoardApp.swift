@@ -83,6 +83,14 @@ struct BoardCommands: Sendable {
     /// Show one state on the pad. A color at 55% on an emissive key is not a swatch
     /// at 55% opacity, so the only honest preview is the hardware itself.
     var previewState: @MainActor (SessionState) -> Void = { _ in }
+    /// The same on-pad preview for `states["unconfirmed"]`, which is a flag on a
+    /// session rather than a `SessionState` (D11) and so has no case to pass.
+    var previewUnconfirmed: @MainActor () -> Void = {}
+    /// Show a color theme on the pad for a moment, without choosing it.
+    var previewTheme: @MainActor (ColorTheme) -> Void = { _ in }
+    /// The theme preview, then `done` exactly once (at once with no pad; before the
+    /// repaint otherwise; at the cut if a newer preview replaces it).
+    var previewThemeThen: @MainActor (ColorTheme, @escaping @MainActor () -> Void) -> Void = { _, done in done() }
     var resetColors: @MainActor () -> Void = {}
     /// Paint the six legend colors and hold them while the capture sheet is open.
     var beginCalibration: @MainActor () -> Void = {}
@@ -103,6 +111,13 @@ struct BoardCommands: Sendable {
     /// Close the dropdown. Only ever called from a row *inside* it — the underlying
     /// click is a toggle, so calling it with nothing showing opens the menu instead.
     var dismissMenu: @MainActor () -> Void = {}
+    /// Play the two-step confirmation light on the pad and arm the harmless probe, as
+    /// the Superset pane's "try it" button.
+    var previewConfirm: @MainActor () -> Void = {}
+    /// Play one workspace switch on the pad, as the Workspaces pane's "try it" button.
+    var previewWorkspaceSweep: @MainActor () -> Void = {}
+    /// Drop the host-service connection and look for the manifest again.
+    var reconnectSuperset: @MainActor () -> Void = {}
 
     /// Whether this build can update itself. False in a local build, which has no
     /// feed signing key — see Updater. The UI asks rather than offering a button that
@@ -167,6 +182,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let isFirstLaunch: Bool
 
     override init() {
+        // A snapshot run may only ever read a scratch config: refuse before anything,
+        // the scene body included, builds `board` from the real one.
+        if SettingsSnapshots.requestedDirectory() != nil,
+           (ProcessInfo.processInfo.environment["OPENBOARD_HOME"] ?? "").isEmpty {
+            FileHandle.standardError.write(Data("snapshots: OPENBOARD_HOME is required\n".utf8))
+            exit(2)
+        }
         isFirstLaunch = !FileManager.default.fileExists(atPath: PreferencesStore.url().path)
         AppPaths.migrateIfNeeded().forEach { name in
             Log.write("migrated \(name) out of ~/.claude/openboard")
@@ -215,6 +237,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         bindingsChanged: { [weak self] in self?.controller?.bindingsChanged() },
         reconnect: { [weak self] in self?.controller?.reconnect() },
         previewState: { [weak self] state in self?.controller?.preview(state) },
+        previewUnconfirmed: { [weak self] in self?.controller?.previewUnconfirmed() },
+        previewTheme: { [weak self] theme in self?.controller?.previewTheme(theme) },
+        previewThemeThen: { [weak self] theme, done in
+            // No controller yet: still exactly once.
+            guard let controller = self?.controller else { done(); return }
+            controller.previewTheme(theme, then: done)
+        },
         resetColors: { [weak self] in
             self?.board.resetToDefaults()
             self?.controller?.bindingsChanged()
@@ -229,6 +258,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openSettings: { [weak self] in self?.showMainWindow() },
         openSetup: { [weak self] in self?.showSetup() },
         dismissMenu: { [weak self] in self?.controller?.dismissMenuBarPopover() },
+        previewConfirm: { [weak self] in self?.controller?.previewConfirm() },
+        previewWorkspaceSweep: { [weak self] in self?.controller?.previewWorkspaceSweep() },
+        reconnectSuperset: { [weak self] in self?.controller?.reconnectSuperset() },
         canUpdate: Updater.isAvailable,
         checkForUpdates: { [weak self] in self?.updater.checkForUpdates() },
         showAvailableUpdate: { [weak self] in self?.updater.showAvailableUpdate() },
@@ -258,6 +290,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // `OPENBOARD_RENDER_SNAPSHOTS=<dir>`: draw the settings panes to PNG and quit,
+        // before the controller exists — no HID, no hook socket, no pad writes.
+        if let directory = SettingsSnapshots.requestedDirectory() {
+            exit(SettingsSnapshots.run(into: directory, board: board, updater: updater, setup: setup))
+        }
+
         // No Dock icon, no app switcher entry, until a window opens. The menu bar is
         // the whole surface the rest of the time.
         NSApp.setActivationPolicy(.accessory)

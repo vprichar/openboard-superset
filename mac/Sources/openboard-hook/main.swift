@@ -53,6 +53,10 @@ let wanted = [
     "CLAUDE_AGENT_SDK_CLIENT_APP",
     "CLAUDE_PID",
     "OPENBOARD_ENTRYPOINTS",
+    // Set by the Superset terminal app in every terminal it hosts. The workspace id is
+    // what a jump deep-links to; the terminal id is kept for a future per-pane jump.
+    "SUPERSET_WORKSPACE_ID",
+    "SUPERSET_TERMINAL_ID",
 ]
 let environment = ProcessInfo.processInfo.environment
 object["env"] = wanted.reduce(into: [String: String]()) { result, key in

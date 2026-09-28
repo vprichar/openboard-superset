@@ -75,10 +75,11 @@ final class Updater: NSObject, ObservableObject {
     ///
     /// Static because the answer is a property of the bundle, not of any instance, and
     /// the UI needs it while building the command table before an updater exists.
-    static var isAvailable: Bool {
-        let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String
-        return !(key ?? "").isEmpty
-    }
+    ///
+    /// Always false in this fork (clone + Superset build): an upstream update would
+    /// replace the bundle with one that lacks the clone layout and the Superset jump.
+    /// The updater is never started, so nothing checks, downloads or prompts.
+    static var isAvailable: Bool { false }
 
     private var controller: SPUStandardUpdaterController?
 
@@ -87,7 +88,7 @@ final class Updater: NSObject, ObservableObject {
         super.init()
 
         guard Self.isAvailable else {
-            Log.write("updates: disabled — this build has no SUPublicEDKey (local build)")
+            Log.write("updates: disabled — fork build, never updated from upstream")
             return
         }
 

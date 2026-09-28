@@ -45,11 +45,38 @@ public struct SessionRegistry: Sendable, Equatable {
         /// can also leave the live set briefly stale; same self-heal applies.
         public var delegatingAgentIDs: Set<String> = []
         public var claimSeq: Int
+        /// Where this session sits on the pad, which is drawn sorted by this rather
+        /// than by `slot` (see `PadView`). A new session takes the cursor, so it goes
+        /// last even when it lands in a freed low slot; a `/clear` or resume in the same
+        /// tab inherits the order of the entry it replaces, so the tab does not jump to
+        /// the end of the pad. Not `claimSeq` itself: that must stay unique and
+        /// monotonic for eviction, and an inherited one would not be.
+        public var boardOrder: Int
         public var claimedAt: Date
         public var updatedAt: Date
+        /// When `state` last changed. Unlike `updatedAt`, a repeated event in the same
+        /// state does not move it — so "waiting for how long" means what it says.
+        public var stateSince: Date
+        /// Superset workspace hosting the session, from the hook's environment. Present
+        /// means a jump deep-links into Superset instead of walking terminal ttys.
+        public var supersetWorkspaceID: String? = nil
+        /// Superset terminal pane id. Stored for a future per-pane jump.
+        public var supersetTerminalID: String? = nil
+        /// Restored from `registry.json` in a state nothing live has confirmed yet
+        /// (see `RegistryStore.load`). A flag rather than a `SessionState`, so every
+        /// switch over states stays as it is; the pad paints it with
+        /// `states["unconfirmed"]`. Cleared by the first live event for the session.
+        public var isUnconfirmed: Bool = false
 
         public var id: String { sessionID }
+
+        /// Put on the board by Superset's bus rather than by a hook — a harness with
+        /// no hooks of ours, like Codex. Keyed by its terminal; it has no pid to watch.
+        public var isBusBorn: Bool { sessionID.hasPrefix(SessionRegistry.busSessionPrefix) }
     }
+
+    /// The session id given to a session born on the bus: its terminal, prefixed.
+    public static let busSessionPrefix = "superset:"
 
     /// `internal` setter, not `private`: Discovery extends this type from another
     /// file in the same module. Still closed to the app, which must go through the
@@ -85,6 +112,11 @@ public struct SessionRegistry: Sendable, Equatable {
         entries.first { $0.sessionID == id }
     }
 
+    /// The session in this Superset terminal, hook-born or bus-born.
+    public func entry(forTerminal id: String) -> Entry? {
+        entries.first { $0.supersetTerminalID == id }
+    }
+
     public func entry(forSlot slot: Int) -> Entry? {
         entries.first { $0.slot == slot }
     }
@@ -117,7 +149,9 @@ public struct SessionRegistry: Sendable, Equatable {
         isAlive: (Int?) -> Bool = SessionRegistry.processIsAlive
     ) -> Bool {
         if entry.state == .ended { return true }
-        if !isAlive(entry.pid) { return true }
+        // A bus session has no process of ours to watch: Superset says when it ends
+        // (`releaseBus`, `syncBus`), and silence ages it like anything else.
+        if !entry.isBusBorn, !isAlive(entry.pid) { return true }
         return now.timeIntervalSince(entry.updatedAt) > staleInterval
     }
 
@@ -183,7 +217,9 @@ public struct SessionRegistry: Sendable, Equatable {
         // Already bound: keep the slot, refresh what may have moved. A resumed
         // session can live in a different tab than it started in.
         if let index = entries.firstIndex(where: { $0.sessionID == sessionID }) {
+            if entries[index].state != state { entries[index].stateSince = now }
             entries[index].state = state
+            entries[index].isUnconfirmed = false
             entries[index].pid = pid ?? entries[index].pid
             entries[index].cwd = cwd ?? entries[index].cwd
             entries[index].tty = tty ?? entries[index].tty
@@ -199,12 +235,16 @@ public struct SessionRegistry: Sendable, Equatable {
          resume. Without this a single tab burns another key every time and the board
          fills with dead entries for a window you never left.
 
-         Only a genuinely finished or gone session's slot is reused — otherwise this
-         would steal a key from a live session sharing the tty.
+         The same pid is the same Claude process, and a process runs one session at a
+         time, so the old entry is superseded even though its pid is still alive — that
+         liveness belongs to the new session. A tty alone is weaker (a new process in a
+         reused tab), so there only a genuinely finished or gone session's slot is
+         reused — otherwise this would steal a key from a live session sharing the tty.
          */
         let sameHost = entries.first { candidate in
-            candidate.sessionID != sessionID
-                && ((tty != nil && candidate.tty == tty) || (pid != nil && candidate.pid == pid))
+            guard candidate.sessionID != sessionID else { return false }
+            if pid != nil, candidate.pid == pid { return true }
+            return tty != nil && candidate.tty == tty
                 && isReclaimable(candidate, now: now, isAlive: isAlive)
         }
 
@@ -229,8 +269,10 @@ public struct SessionRegistry: Sendable, Equatable {
             state: state,
             pendingTool: nil,
             claimSeq: cursor,
+            boardOrder: sameHost?.boardOrder ?? cursor,
             claimedAt: now,
-            updatedAt: now
+            updatedAt: now,
+            stateSince: now
         )
         entries.removeAll { $0.slot == pick.slot }
         entries.append(entry)
@@ -251,9 +293,13 @@ public struct SessionRegistry: Sendable, Equatable {
         guard let index = entries.firstIndex(where: { $0.sessionID == sessionID }) else {
             return nil
         }
+        // Any live word about the session confirms a restored entry, even one the
+        // state rules below decline to act on.
+        entries[index].isUnconfirmed = false
         guard SessionState.mayReplace(entries[index].state, with: state) else {
             return entries[index]
         }
+        if entries[index].state != state { entries[index].stateSince = now }
         entries[index].state = state
         if let pendingTool { entries[index].pendingTool = pendingTool }
         // Leaving an attention state means nothing is pending any more.
@@ -372,10 +418,12 @@ public struct SessionRegistry: Sendable, Equatable {
             // Zero, or anything below it, means never — the key holds until you go back.
             case .done where doneAfter > 0 && age > doneAfter:
                 entries[index].state = .idle
+                entries[index].stateSince = now
                 changed += 1
             case .awaiting, .stalled:
                 if !holdAttention, age > Self.attentionTimeout {
                     entries[index].state = .idle
+                    entries[index].stateSince = now
                     entries[index].pendingTool = nil
                     changed += 1
                 }
@@ -404,7 +452,9 @@ public struct SessionRegistry: Sendable, Equatable {
         transcriptPath: String? = nil,
         entrypoint: String? = nil,
         tty: String? = nil,
-        pid: Int? = nil
+        pid: Int? = nil,
+        supersetWorkspaceID: String? = nil,
+        supersetTerminalID: String? = nil
     ) -> Bool {
         guard let index = entries.firstIndex(where: { $0.sessionID == sessionID }) else {
             return false
@@ -421,6 +471,14 @@ public struct SessionRegistry: Sendable, Equatable {
         }
         if entries[index].tty == nil, let tty { entries[index].tty = tty; changed = true }
         if entries[index].pid == nil, let pid { entries[index].pid = pid; changed = true }
+        if entries[index].supersetWorkspaceID == nil, let supersetWorkspaceID {
+            entries[index].supersetWorkspaceID = supersetWorkspaceID
+            changed = true
+        }
+        if entries[index].supersetTerminalID == nil, let supersetTerminalID {
+            entries[index].supersetTerminalID = supersetTerminalID
+            changed = true
+        }
         // Asked once, when the pid first arrives: `ps` is not free, and which app owns
         // a live process cannot change.
         if entries[index].host == .unknown, let pid = entries[index].pid {
@@ -428,6 +486,144 @@ public struct SessionRegistry: Sendable, Equatable {
             if host != .unknown { entries[index].host = host; changed = true }
         }
         return changed
+    }
+
+    // MARK: - Superset's bus (F3)
+
+    public enum BusOutcome: Equatable, Sendable {
+        case claimed(slot: Int)
+        case updated(sessionID: String)
+        /// Nothing to do: a hooked session's hooks own this state, a terminal the bus
+        /// may not claim, or a change the state rules decline.
+        case ignored
+        /// Every key is asking for something.
+        case noSlot
+    }
+
+    /**
+     Apply a lifecycle change from Superset's bus (after `LifecycleMapper`).
+
+     - A **bus session** (no hooks) follows the bus in full.
+     - A **hooked session** in that terminal only takes `error`: its hooks already
+       report every other state, with more to go on (pending tools, delegating
+       subagents) — a bus `Stop` would paint `done` over a session still delegating.
+       `Failed` is the one the hooks can miss.
+     - An unknown terminal gets a key only when `mayClaim` — false for agents that
+       have hooks, whose own `SessionStart` claims them.
+     */
+    @discardableResult
+    public mutating func applyBus(
+        _ change: LifecycleMapper.Change,
+        mayClaim: Bool,
+        now: Date = Date(),
+        isAlive: (Int?) -> Bool = SessionRegistry.processIsAlive
+    ) -> BusOutcome {
+        if let entry = entry(forTerminal: change.terminalID) {
+            guard entry.isBusBorn || change.state == .error else { return .ignored }
+            let before = entry.state
+            guard let after = setState(sessionID: entry.sessionID, to: change.state, now: now) else {
+                return .ignored
+            }
+            if let index = entries.firstIndex(where: { $0.sessionID == entry.sessionID }),
+               entries[index].supersetWorkspaceID == nil {
+                entries[index].supersetWorkspaceID = change.workspaceID
+            }
+            return after.state == before && before != change.state ? .ignored : .updated(sessionID: entry.sessionID)
+        }
+        guard mayClaim, change.state != .ended else { return .ignored }
+        let result = claim(
+            sessionID: Self.busSessionPrefix + change.terminalID,
+            entrypoint: Self.busSessionPrefix + change.agent,
+            state: change.state,
+            now: now,
+            isAlive: isAlive
+        )
+        guard let claimed = result.entry else { return .noSlot }
+        if let index = entries.firstIndex(where: { $0.sessionID == claimed.sessionID }) {
+            entries[index].supersetWorkspaceID = change.workspaceID
+            entries[index].supersetTerminalID = change.terminalID
+        }
+        return .claimed(slot: claimed.slot)
+    }
+
+    /// `Detached`: the bus session in this terminal is over and its key is free.
+    /// Hooked sessions are left to their own `SessionEnd`. Returns the slot freed.
+    @discardableResult
+    public mutating func releaseBus(terminalID: String) -> Int? {
+        guard let entry = entry(forTerminal: terminalID), entry.isBusBorn else { return nil }
+        release(sessionID: entry.sessionID)
+        return entry.slot
+    }
+
+    /**
+     Bring the bus sessions in line with `terminalAgents.list`: a terminal no longer
+     listed (or `Detached`) gives its key back; an unhooked agent not on the board yet
+     gets one, in the state of its last event (none yet reads as idle). Agents in
+     `hookedAgents` are left to their hooks. Returns whether anything changed.
+     */
+    @discardableResult
+    public mutating func syncBus(
+        bindings: [AgentBinding],
+        hookedAgents: Set<String>,
+        now: Date = Date(),
+        isAlive: (Int?) -> Bool = SessionRegistry.processIsAlive
+    ) -> Bool {
+        var changed = false
+        let live = Dictionary(
+            bindings.filter { $0.lastEventType != .detached }.map { ($0.terminalID, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        for entry in entries where entry.isBusBorn {
+            if let terminal = entry.supersetTerminalID, live[terminal] != nil { continue }
+            release(sessionID: entry.sessionID)
+            changed = true
+        }
+        for binding in bindings where live[binding.terminalID] != nil && !hookedAgents.contains(binding.agent) {
+            guard entry(forTerminal: binding.terminalID) == nil else { continue }
+            let state = binding.lastEventType.flatMap(LifecycleMapper.state(for:)) ?? .idle
+            let change = LifecycleMapper.Change(
+                terminalID: binding.terminalID, workspaceID: binding.workspaceID,
+                agent: binding.agent, state: state
+            )
+            if case .claimed = applyBus(change, mayClaim: true, now: now, isAlive: isAlive) { changed = true }
+        }
+        return changed
+    }
+
+    /**
+     A hook arrived from a terminal the bus had already put on the board (it spoke
+     first). The hook's session takes over that entry — same key, same place on the
+     pad — so one terminal never holds two keys. Returns whether one was taken over.
+     */
+    @discardableResult
+    public mutating func promoteBusEntry(terminalID: String, to sessionID: String) -> Bool {
+        guard entry(forSession: sessionID) == nil,
+              let index = entries.firstIndex(where: { $0.supersetTerminalID == terminalID && $0.isBusBorn })
+        else { return false }
+        entries[index].sessionID = sessionID
+        entries[index].entrypoint = nil
+        return true
+    }
+
+    /**
+     The launch reconciliation (`Reconciler`): Superset's word replaces what the file
+     restored — even `awaiting` → `done`, which the ordinary state rules would refuse,
+     because the restored state is exactly what is not trusted.
+     */
+    public mutating func apply(_ outcomes: [Reconciler.Outcome], now: Date = Date()) {
+        for outcome in outcomes {
+            switch outcome {
+            case let .confirm(sessionID, state):
+                guard let index = entries.firstIndex(where: { $0.sessionID == sessionID }) else { continue }
+                if entries[index].state != state { entries[index].stateSince = now }
+                entries[index].state = state
+                entries[index].isUnconfirmed = false
+                if !state.isAttention { entries[index].pendingTool = nil }
+                entries[index].updatedAt = now
+            case let .end(sessionID):
+                markEnded(sessionID: sessionID, now: now)
+            }
+        }
     }
 
     /**
@@ -605,5 +801,24 @@ public enum EventMapper {
         delegatedCount: Int
     ) -> Bool {
         eventName == "Notification" && matcher == "idle_prompt" && delegatedCount > 0
+    }
+}
+
+extension LifecycleType {
+    /**
+     The lifecycle event a hook's mapped state stands for, so our own hooks can be fed
+     through `LifecycleMapper` and a bus echo of the same moment is counted once.
+     Nil for states the bus has no event for.
+     */
+    public static func forHookState(_ state: SessionState) -> LifecycleType? {
+        switch state {
+        case .working: .start
+        case .done: .stop
+        case .awaiting: .permissionRequest
+        case .error: .failed
+        case .idle: .attached
+        case .ended: .detached
+        default: nil
+        }
     }
 }

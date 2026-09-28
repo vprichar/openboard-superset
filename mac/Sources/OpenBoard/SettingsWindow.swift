@@ -28,12 +28,16 @@ struct SettingsWindow: View {
     }
 
     @State private var selection: Selection = .pane(.board)
+    /// Read only to rebuild the window when the interface language changes.
+    @AppStorage(UIStrings.defaultsKey) private var uiLanguage = UIStrings.defaultLanguage.rawValue
     @State private var installed: Set<String> = []
 
     enum Pane: String, CaseIterable, Identifiable {
         case board = "Board"
         case colors = "Colors"
         case device = "Device"
+        case superset = "Superset"
+        case workspaces = "Workspaces"
 
         var id: String { rawValue }
 
@@ -42,6 +46,19 @@ struct SettingsWindow: View {
             case .board: "square.grid.3x2"
             case .colors: "paintpalette"
             case .device: "cable.connector"
+            case .superset: "terminal"
+            case .workspaces: "rectangle.stack"
+            }
+        }
+
+        /// What the sidebar calls it. The raw value stays English as an identifier.
+        var title: String {
+            switch self {
+            case .board: tr("Tablero")
+            case .colors: tr("Colores")
+            case .device: tr("Dispositivo")
+            case .superset: "Superset"
+            case .workspaces: tr("Espacios de trabajo")
             }
         }
 
@@ -54,6 +71,8 @@ struct SettingsWindow: View {
             case .board: Color(RGB(0x0C47E9))
             case .colors: Color(RGB(0xD41145))
             case .device: Color(RGB(0x09B821))
+            case .superset: Color(RGB(0xFF6A00))
+            case .workspaces: Color(RGB(0x9B30FF))
             }
         }
 
@@ -105,14 +124,14 @@ struct SettingsWindow: View {
                             // in the menu bar, where it is the only thing identifying
                             // which board you are looking at; in a window whose title
                             // is already the app, it was a long line saying little.
-                            title: board.device.isUsable ? "Connected" : "Pad unavailable",
+                            title: board.device.isUsable ? tr("Conectado") : tr("Pad no disponible"),
                             detail: board.device.isUsable
-                                ? "\(liveCount) session\(liveCount == 1 ? "" : "s")"
+                                ? (liveCount == 1 ? tr("%ld sesión", liveCount) : tr("%ld sesiones", liveCount))
                                 : board.device.headline(board.deviceName),
                             ok: board.device.isUsable
                         )
                     } header: {
-                        Text("STATUS")
+                        Text(tr("ESTADO"))
                             .font(.system(size: 10, weight: .semibold)).kerning(0.6)
                             .foregroundStyle(.tertiary)
                     }
@@ -153,13 +172,17 @@ struct SettingsWindow: View {
                 // would be a locked door with the key behind it.
                 switch selection {
                 case .pane(.board):
-                    BoardPane().requiresSetup("What each key does")
+                    BoardPane().requiresSetup(tr("Lo que hace cada tecla"))
                 case .pane(.colors):
-                    ColorsPane().requiresSetup("How the keys look")
+                    ColorsPane().requiresSetup(tr("El aspecto de las teclas"))
                 case .pane(.device):
                     DevicePane()
+                case .pane(.superset):
+                    SupersetPane()
+                case .pane(.workspaces):
+                    WorkspacePane()
                 case let .harness(id):
-                    HarnessPane(harnessID: id).requiresSetup("How this harness is shown")
+                    HarnessPane(harnessID: id).requiresSetup(tr("Cómo se muestra este harness"))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -174,6 +197,9 @@ struct SettingsWindow: View {
         // SwiftUI resolves the accent from an asset catalog, and a SwiftPM build has
         // none. See SystemColors.
         .tint(SystemColors.selectedRow)
+        // A new language rebuilds the panes so every string is looked up again; the
+        // selected pane is this view's own state and survives.
+        .id(uiLanguage)
     }
 
     private var liveCount: Int { board.slots.filter(\.isLive).count }
@@ -210,7 +236,7 @@ struct SidebarRow: View {
                         .font(.system(size: 11.5, weight: .semibold))
                         .foregroundStyle(.white)
                 }
-            Text(pane.rawValue).font(.system(size: 13))
+            Text(pane.title).font(.system(size: 13))
         }
         .padding(.vertical, 1)
     }
@@ -283,8 +309,20 @@ struct BoardPane: View {
     /// Deliberately nil at first. Opening on a preselected key implies you asked about
     /// it, and hides the fact that the board is the thing to click.
     @State private var selected: String?
+    /// Which app's profile the inspector edits; nil is the base bindings ("All apps").
+    @State private var context: String?
+    /// Tap or Hold, for the action caps.
+    @State private var gesture: OpenBoardKit.Gesture
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: 7), count: 4)
+
+    /// The defaults are what the window opens with; the snapshot harness passes a key,
+    /// a context and a gesture to picture a particular state.
+    init(selected: String? = nil, context: String? = nil, gesture: OpenBoardKit.Gesture = .tap) {
+        _selected = State(initialValue: selected)
+        _context = State(initialValue: context)
+        _gesture = State(initialValue: gesture)
+    }
 
     var body: some View {
         ScrollView {
@@ -292,22 +330,64 @@ struct BoardPane: View {
                 // No page title: the sidebar already says which pane this is, and a
                 // heading that repeats the selected row is a line of chrome between you
                 // and the first setting.
-                PaneHeader("Name", "What this pad is called everywhere in OpenBoard.")
+                PaneHeader(tr("Nombre"), tr("Cómo se llama este pad en todo OpenBoard."))
                 nameRow
 
-                PaneHeader("Map keys", "Click a key to see what it does and change its cap.")
-                HStack(alignment: .top, spacing: 20) {
-                    padCase
-                    if let selected, let cell = BoardLayout.cell(id: selected) {
-                        CapInspector(cell: cell) { self.selected = nil }
-                            .frame(width: 300)
-                            .transition(.opacity)
+                PaneHeader(tr("Asignar teclas"), tr("Haz clic en una tecla para ver qué hace y cambiar su tapa."))
+                ProfileContextBar(context: $context)
+                // Side by side when both fit, the inspector under the pad when not. Both
+                // are fixed-width, so an HStack that does not fit overlaps them instead
+                // of shrinking — the pad drew over the inspector's first letters.
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 20) {
+                        padCase
+                        inspector
                     }
-                    Spacer(minLength: 0)
+                    VStack(alignment: .leading, spacing: 16) {
+                        padCase
+                        inspector
+                    }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(22)
         }
+        // A new key opens on what it does when tapped, whatever the last one showed.
+        .onChange(of: selected) { gesture = .tap }
+    }
+
+    @ViewBuilder
+    private var inspector: some View {
+        if let selected, let cell = BoardLayout.cell(id: selected) {
+            CapInspector(cell: cell, context: context, gesture: $gesture) { self.selected = nil }
+                .frame(width: 300)
+                .transition(.opacity)
+        }
+    }
+
+    /**
+     What the ring's LED bar beside the touch hole shows: the "One color" setting when
+     that is the mode. The live ring (laps, pulses) is the controller's and is not
+     published to the model, so every other mode is drawn unlit rather than guessed.
+     */
+    private var ringLight: Appearance? {
+        let ambient = board.preferences.ambient
+        guard ambient.mode == "fixed", ambient.fixed.effect != .off else { return nil }
+        return ambient.fixed
+    }
+
+    /// The caps the chosen context overrides, for the profile badge.
+    private var overridden: Set<String> {
+        guard let context else { return [] }
+        return SettingsEditing.overriddenCells(profile: context, in: board.preferences)
+    }
+
+    /// Whether holding this action cap does something in the chosen context.
+    private func hasHold(_ cell: BoardCell) -> Bool {
+        guard cell.isAction else { return false }
+        return ProfileResolver.resolve(
+            .action(cell.id), .hold, frontBundleID: context, prefs: board.preferences
+        ).action != nil
     }
 
     /**
@@ -334,7 +414,7 @@ struct BoardPane: View {
             // something anyone needs to read. Kept only for the case the field cannot
             // be used at all, where the reason matters.
             if board.deviceSerial == nil {
-                Text("No pad attached")
+                Text(tr("No hay ningún pad conectado"))
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
             }
@@ -388,7 +468,10 @@ struct BoardPane: View {
                             },
                             capID: board.caps[cell.id],
                             action: board.actions[cell.id],
-                            isSelected: selected == cell.id
+                            isSelected: selected == cell.id,
+                            hasHold: hasHold(cell),
+                            isOverridden: overridden.contains(cell.id),
+                            ring: ringLight
                         )
                         .gridCellColumns(cell.span)
                         .onTapGesture { selected = cell.id }
@@ -409,9 +492,11 @@ struct BoardPane: View {
             RoundedRectangle(cornerRadius: 30, style: .continuous)
                 .fill(LinearGradient(
                     stops: [
-                        .init(color: Color(RGB(0xFCFCFB)), location: 0),
-                        .init(color: Color(RGB(0xEDECE8)), location: 0.52),
-                        .init(color: Color(RGB(0xDBD9D3)), location: 1),
+                        // Frosted grey acrylic, as on the clone: a translucent case
+                        // around a white plate.
+                        .init(color: Color(RGB(0xDCDCDA)), location: 0),
+                        .init(color: Color(RGB(0xC4C4C1)), location: 0.52),
+                        .init(color: Color(RGB(0xAEAEAB)), location: 1),
                     ],
                     startPoint: UnitPoint(x: 0.09, y: 0), endPoint: UnitPoint(x: -0.09, y: 1)
                 ))
@@ -430,7 +515,7 @@ struct BoardPane: View {
     private var plate: some View {
         RoundedRectangle(cornerRadius: 20, style: .continuous)
             .fill(LinearGradient(
-                colors: [Color(RGB(0xF7F6F3)), Color(RGB(0xEFEEEA))],
+                colors: [Color(RGB(0xFBFBF9)), Color(RGB(0xF2F2EF))],
                 startPoint: .top, endPoint: .bottom
             ))
             .overlay {
@@ -492,16 +577,32 @@ struct CapInspector: View {
      */
     @Environment(\.boardCommands) private var commands
     let cell: BoardCell
+    /// The app profile being edited, or nil for the base bindings.
+    var context: String? = nil
+    /// Tap or Hold, for the action caps. Owned by the pane so it survives a redraw.
+    var gesture: Binding<OpenBoardKit.Gesture> = .constant(.tap)
     /// Dismiss. An inspector that cannot be closed is a permanent column of controls
     /// for a decision already made.
     var close: () -> Void = {}
 
+    init(
+        cell: BoardCell,
+        context: String? = nil,
+        gesture: Binding<OpenBoardKit.Gesture> = .constant(.tap),
+        close: @escaping () -> Void = {}
+    ) {
+        self.cell = cell
+        self.context = context
+        self.gesture = gesture
+        self.close = close
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 9) {
-                Text(title).font(.system(size: 12, weight: .semibold).monospaced())
+                Text(title).font(.system(size: 12, weight: .semibold))
                 Text(kind)
-                    .font(.system(size: 10).monospaced())
+                    .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 7).padding(.vertical, 3)
                     .background(.quaternary.opacity(0.5), in: .capsule)
@@ -514,23 +615,23 @@ struct CapInspector: View {
                         .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
-                .help("Close")
+                .help(tr("Cerrar"))
             }
 
             switch cell.kind {
             case .element(.encoder):
                 // Kept: it scrolls whatever is under the pointer, not the focused
                 // window, which is not what a dial on a keyboard implies.
-                Text("Scrolls the window under the pointer.")
+                Text(tr("Desplaza la ventana que está bajo el puntero."))
                     .font(.system(size: 12.5)).foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("TURNING CLOCKWISE")
+                    Text(tr("AL GIRAR A LA DERECHA"))
                         .font(.system(size: 10, weight: .semibold)).kerning(0.8)
                         .foregroundStyle(.tertiary)
                     Picker("", selection: encoderDirectionBinding) {
-                        Text("Scrolls up").tag(true)
-                        Text("Scrolls down").tag(false)
+                        Text(tr("Sube")).tag(true)
+                        Text(tr("Baja")).tag(false)
                     }
                     .labelsHidden()
                     .pickerStyle(.segmented)
@@ -539,13 +640,13 @@ struct CapInspector: View {
                     // feel like depends on a setting this app cannot read.
                     // Kept: otherwise the missing second direction reads as an
                     // omission, and someone goes looking for it.
-                    Text("Counter-clockwise is always the opposite.")
+                    Text(tr("Al girar a la izquierda hace siempre lo contrario."))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("LINES PER CLICK")
+                        Text(tr("LÍNEAS POR CLIC"))
                             .font(.system(size: 10, weight: .semibold)).kerning(0.8)
                             .foregroundStyle(.tertiary)
                         Spacer()
@@ -558,16 +659,12 @@ struct CapInspector: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("PRESSING DOES")
+                    Text(tr("AL PULSAR"))
                         .font(.system(size: 10, weight: .semibold)).kerning(0.8)
                         .foregroundStyle(.tertiary)
-                    Picker("", selection: encoderActionBinding(\.click)) {
-                        Text("nothing").tag(KeyAction?.none)
-                        ForEach(KeyAction.allCases, id: \.self) { action in
-                            Text(action.long).tag(KeyAction?.some(action))
-                        }
-                    }
-                    .labelsHidden()
+                    GroupedActionPicker(selection: encoderActionBinding(\.click), noneLabel: tr("nada"))
+                        .disabled(context != nil)
+                    if context != nil { SameEverywhereNote() }
                 }
                 if board.preferences.encoder.click?.needsShortcut == true {
                     shortcutSection(key: "ENC", allowHold: false)
@@ -575,28 +672,26 @@ struct CapInspector: View {
 
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
-                        Text("HOLDING DOES")
+                        Text(tr("AL MANTENER"))
                             .font(.system(size: 10, weight: .semibold)).kerning(0.8)
                             .foregroundStyle(.tertiary)
                         Spacer()
-                        Text("after \(board.preferences.encoder.longPressMs)ms")
-                            .font(.system(size: 11).monospaced())
+                        Text(tr("tras %ld ms", board.preferences.encoder.longPressMs))
+                            .font(.system(size: 11).monospacedDigit())
                             .foregroundStyle(.tertiary)
                     }
-                    Picker("", selection: encoderActionBinding(\.longPress)) {
-                        Text("nothing").tag(KeyAction?.none)
-                        ForEach(KeyAction.allCases, id: \.self) { action in
-                            Text(action.long).tag(KeyAction?.some(action))
-                        }
+                    if let context {
+                        ProfileOverrideRow(control: .encoderLong, gesture: .hold, profile: context, noneLabel: tr("nada"))
+                    } else {
+                        GroupedActionPicker(selection: encoderActionBinding(\.longPress), noneLabel: tr("nada"))
                     }
-                    .labelsHidden()
                     Slider(value: holdMsBinding, in: 150...1200, step: 50)
                     // The hold fires while the dial is still down, not on release:
                     // classifying on release gives no feedback that you have held it
                     // long enough, so people let go early and get the wrong action.
                 }
-                if board.preferences.encoder.longPress?.needsShortcut == true {
-                    shortcutSection(key: "ENC.long", allowHold: false)
+                if resolved(.encoderLong, .hold).action?.needsShortcut == true {
+                    shortcutSection(key: resolved(.encoderLong, .hold).payloadKey, allowHold: false)
                 }
 
             case .element(.joystick):
@@ -605,54 +700,71 @@ struct CapInspector: View {
                         Text(direction.rawValue.uppercased())
                             .font(.system(size: 10, weight: .semibold)).kerning(0.8)
                             .foregroundStyle(.tertiary)
-                        Picker("", selection: stickBinding(direction)) {
-                            Text("unassigned").tag(KeyAction?.none)
-                            ForEach(KeyAction.forJoystick, id: \.self) { action in
-                                Text(action.long).tag(KeyAction?.some(action))
-                            }
+                        if let context {
+                            ProfileOverrideRow(
+                                control: .joystick(direction), gesture: .tap, profile: context,
+                                noneLabel: tr("sin asignar"), actions: KeyAction.forJoystick
+                            )
+                        } else {
+                            GroupedActionPicker(
+                                selection: stickBinding(direction), noneLabel: tr("sin asignar"),
+                                actions: KeyAction.forJoystick
+                            )
                         }
-                        .labelsHidden()
                     }
-                    if board.preferences.joystick.action(for: direction)?.needsShortcut == true {
-                        shortcutSection(key: "JOY.\(direction.rawValue)", allowHold: false)
+                    if resolved(.joystick(direction), .tap).action?.needsShortcut == true {
+                        shortcutSection(key: resolved(.joystick(direction), .tap).payloadKey, allowHold: false)
                     }
                 }
 
                 // Kept: a stick you can hold looks like it should repeat.
-                Text("One push is one action, however long you hold it.")
+                Text(tr("Un empuje es una acción, por mucho que lo mantengas."))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
 
             case .element(.touch):
-                inert("No event has ever been observed from this sensor.")
+                inert(tr("Este sensor no ha enviado nunca ningún evento."))
 
             case .agent:
                 // Kept: this pane is where every other key is rebound.
-                Text("Agent keys always jump to their slot and cannot be rebound.")
+                Text(tr("Las teclas de agente siempre saltan a su posición y no se pueden reasignar."))
                     .font(.system(size: 12.5)).foregroundStyle(.secondary)
+                RemoteBlock()
                 capPicker(allowNone: true)
 
             case .action:
-                actionPicker(title: "PRESSING THIS KEY", key: cell.id)
-                if board.actions[cell.id]?.needsSnippetText == true {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("TEXT IT TYPES")
-                            .font(.system(size: 10, weight: .semibold)).kerning(0.8)
-                            .foregroundStyle(.tertiary)
-                        TextField("", text: snippetBinding)
-                            .textFieldStyle(.roundedBorder)
-                            .font(.system(size: 12.5).monospaced())
-                        Text("Typed at the cursor. Not submitted.")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
+                if SettingsEditing.offersHold(cell) {
+                    GesturePicker(gesture: gesture)
                 }
-                if board.actions[cell.id]?.needsShortcut == true {
-                    shortcutSection(key: cell.id, allowHold: true)
+                if gesture.wrappedValue == .hold {
+                    HoldSection(cell: cell, context: context)
+                    if resolved(.action(cell.id), .hold).action?.needsShortcut == true {
+                        shortcutSection(key: resolved(.action(cell.id), .hold).payloadKey, allowHold: false)
+                    }
+                } else {
+                    actionPicker(title: tr("AL PULSAR ESTA TECLA"), key: cell.id)
+                    if context != nil { SameEverywhereNote() }
+                    if board.actions[cell.id]?.needsSnippetText == true {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(tr("TEXTO QUE ESCRIBE"))
+                                .font(.system(size: 10, weight: .semibold)).kerning(0.8)
+                                .foregroundStyle(.tertiary)
+                            TextField("", text: snippetBinding)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.system(size: 12.5).monospaced())
+                            Text(tr("Se escribe en el cursor. No se envía."))
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                            DangerousSnippetWarning(text: board.snippets[cell.id] ?? "")
+                        }
+                    }
+                    if board.actions[cell.id]?.needsShortcut == true {
+                        shortcutSection(key: cell.id, allowHold: true)
+                    }
                 }
                 capPicker(allowNone: false)
                 if cell.span > 1 {
                     // Kept: the title reads "ACT10 + ACT11", which looks like two keys
                     // to bind separately.
-                    Text("One keycap, two switches — bound as \(cell.members[0]).")
+                    Text(tr("Una tapa, dos interruptores: se asigna como %@.", cell.members[0]))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
@@ -674,35 +786,57 @@ struct CapInspector: View {
     /// stick have no release edge, so they are never offered hold.
     @ViewBuilder
     private func shortcutSection(key: String, allowHold: Bool) -> some View {
-        let recorded = board.preferences.shortcuts[key]
+        // `JOY.up@bundle` falls back to `JOY.up`, as the dispatcher does, so an
+        // inherited chord shows; recording one writes the profile's own.
+        let recorded = ProfileResolver.shortcut(forPayloadKey: key, prefs: board.preferences)
         VStack(alignment: .leading, spacing: 6) {
-            Text("SHORTCUT IT SENDS")
+            Text(tr("ATAJO QUE ENVÍA"))
                 .font(.system(size: 10, weight: .semibold)).kerning(0.8)
                 .foregroundStyle(.tertiary)
             ShortcutRecorder(shortcut: recorded) { chord in
                 var next = chord
                 next.mode = recorded?.mode ?? .tap
-                board.updatePreferences { $0.shortcuts[key] = next }
+                // Re-recording the keys keeps the count.
+                next.repeats = recorded?.repeats ?? 1
+                board.updatePreferences { SettingsEditing.setShortcut(next, payloadKey: key, in: &$0) }
                 commands.bindingsChanged()
             }
-            Text("Press the keys on your keyboard. Esc cancels.")
+            Text(tr("Pulsa las teclas en tu teclado. Esc cancela."))
                 .font(.system(size: 11)).foregroundStyle(.secondary)
+            // Sends the chord N times per press, a moment apart — ⎋ ×2 is Claude Code's
+            // double Esc. Only for a tapped chord; a held one is held, not repeated.
+            if let recorded, recorded.mode == .tap {
+                Stepper(value: shortcutRepeatBinding(key, current: recorded.repeats), in: Shortcut.repeatRange) {
+                    Text(tr("Repetir ×%ld", recorded.repeats))
+                        .font(.system(size: 12.5).monospacedDigit())
+                }
+            }
         }
         if allowHold, recorded != nil {
             VStack(alignment: .leading, spacing: 6) {
-                Text("WHEN PRESSED")
+                Text(tr("AL PULSARLA"))
                     .font(.system(size: 10, weight: .semibold)).kerning(0.8)
                     .foregroundStyle(.tertiary)
                 Picker("", selection: shortcutModeBinding(key)) {
-                    Text("Taps it").tag(Shortcut.Mode.tap)
-                    Text("Holds it while pressed").tag(Shortcut.Mode.hold)
+                    Text(tr("Lo toca")).tag(Shortcut.Mode.tap)
+                    Text(tr("Lo mantiene mientras pulsas")).tag(Shortcut.Mode.hold)
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
-                Text("Hold keeps the chord down until you let go, like hold to dictate.")
+                Text(tr("Mantener deja el atajo pulsado hasta que sueltas, como mantener para dictar."))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func shortcutRepeatBinding(_ key: String, current: Int) -> Binding<Int> {
+        Binding(
+            get: { current },
+            set: { count in
+                board.updatePreferences { SettingsEditing.setShortcutRepeat(count, payloadKey: key, in: &$0) }
+                commands.bindingsChanged()
+            }
+        )
     }
 
     private func shortcutModeBinding(_ key: String) -> Binding<Shortcut.Mode> {
@@ -720,20 +854,20 @@ struct CapInspector: View {
             Text(title)
                 .font(.system(size: 10, weight: .semibold)).kerning(0.8)
                 .foregroundStyle(.tertiary)
-            Picker("", selection: actionBinding(key)) {
-                Text("unassigned").tag(KeyAction?.none)
-                ForEach(KeyAction.allCases, id: \.self) { action in
-                    Text(action.long).tag(KeyAction?.some(action))
-                }
-            }
-            .labelsHidden()
+            GroupedActionPicker(selection: actionBinding(key), noneLabel: tr("sin asignar"))
+                .disabled(context != nil)
         }
+    }
+
+    /// What this control does in the chosen context, and the key its chord is under.
+    private func resolved(_ control: PadControl, _ gesture: OpenBoardKit.Gesture) -> Resolved {
+        ProfileResolver.resolve(control, gesture, frontBundleID: context, prefs: board.preferences)
     }
 
     /// The real Codex Micro caps, so the window matches the hardware.
     private func capPicker(allowNone: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("KEYCAP")
+            Text(tr("TAPA"))
                 .font(.system(size: 10, weight: .semibold)).kerning(0.8)
                 .foregroundStyle(.tertiary)
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 42), spacing: 6)], spacing: 6) {
@@ -742,8 +876,14 @@ struct CapInspector: View {
                     // glyph competes with it.
                     capButton(id: nil)
                 }
-                ForEach(KeycapCatalog.caps, id: \.id) { cap in
+                // Blank moulds are left out; one already on this key still shows, so
+                // the current choice is never invisible.
+                ForEach(KeycapCatalog.selectable, id: \.id) { cap in
                     capButton(id: cap.id)
+                }
+                if let current = board.caps[cell.id],
+                   !KeycapCatalog.selectable.contains(where: { $0.id == current }) {
+                    capButton(id: current)
                 }
             }
         }
@@ -764,6 +904,8 @@ struct CapInspector: View {
                     KeycapIconView(icon: icon).frame(width: 18, height: 18)
                 } else if id == nil {
                     Image(systemName: "nosign").font(.system(size: 12)).foregroundStyle(.tertiary)
+                } else if let id {
+                    Text(id).font(.system(size: 8, weight: .semibold)).foregroundStyle(.secondary)
                 }
             }
             .frame(height: 34)
@@ -773,25 +915,26 @@ struct CapInspector: View {
             )
         }
         .buttonStyle(.plain)
-        .help(id ?? "no icon")
+        .help(id ?? tr("sin icono"))
     }
 
     private var title: String {
         switch cell.kind {
-        case let .agent(slot): "\(cell.id) · slot \(slot)"
+        case let .agent(slot): tr("%@ · posición %ld", cell.id, slot)
         case .element(.encoder): "ENCODER"
         case .element(.joystick): "JOYSTICK"
-        case .element(.touch): "TOUCH SENSOR"
+        case .element(.touch): tr("SENSOR TÁCTIL")
         case .action: cell.span > 1 ? cell.members.joined(separator: " + ") : cell.id
         }
     }
 
     private var kind: String {
         switch cell.kind {
-        case .agent: "agent key · always jumps to its slot"
-        case .element(.encoder): "dial · turn and click"
-        case .element: "inert"
-        case .action: cell.span > 1 ? "action key · one wide cap" : "action key · yours to set"
+        case .agent: tr("tecla de agente · salta a su posición")
+        case .element(.encoder): tr("dial · girar y pulsar")
+        case .element(.joystick): tr("joystick · un empuje, una acción")
+        case .element: tr("sin función")
+        case .action: cell.span > 1 ? tr("tecla de acción · una tapa ancha") : tr("tecla de acción · configurable")
         }
     }
 
@@ -892,6 +1035,13 @@ struct BoardCapView: View {
     let capID: String?
     let action: KeyAction?
     let isSelected: Bool
+    /// Holding it does something: a dot in the corner. Settings window only.
+    var hasHold: Bool = false
+    /// The chosen app profile overrides it: an "S" badge. Settings window only.
+    var isOverridden: Bool = false
+    /// The ring's color, for the LED bar the pad has beside the touch hole. Nil draws
+    /// it unlit.
+    var ring: Appearance? = nil
     /**
      Drop the moulded-plastic finish.
 
@@ -935,8 +1085,56 @@ struct BoardCapView: View {
     private var isAgent: Bool { if case .agent = cell.kind { true } else { false } }
 
     var body: some View {
+        if isTouch && !isFlat {
+            touchHole
+        } else {
+            cap
+        }
+    }
+
+    /**
+     The touch position, as the clone has it: no key, a hole through the plate, and the
+     ring's four LEDs in a bar beside it.
+     */
+    private var touchHole: some View {
+        ZStack {
+            Circle()
+                .fill(RadialGradient(
+                    colors: [Color(RGB(0x040405)), Color(RGB(0x18181A))],
+                    center: UnitPoint(x: 0.45, y: 0.4), startRadius: 0, endRadius: 15
+                ))
+                .overlay { Circle().strokeBorder(.black.opacity(0.18), lineWidth: 0.5) }
+                .frame(width: 28, height: 28)
+            if isSelected {
+                Circle().strokeBorder(SystemColors.selectedRow, lineWidth: 2.5).frame(width: 36, height: 36)
+            }
+        }
+        .frame(width: Self.unit, height: Self.unit)
+        .overlay(alignment: .leading) {
+            VStack(spacing: 2.5) {
+                // Five, as on the plate's silkscreen and the line drawing of the pad.
+                ForEach(0..<5, id: \.self) { _ in
+                    Capsule()
+                        .fill(ring.map { Color($0.color).opacity(0.55 + 0.45 * $0.brightness) }
+                            ?? Color(RGB(0xCFCFCC)))
+                        .frame(width: 5, height: 4)
+                        .shadow(color: ring.map { Color($0.color).opacity(0.8) } ?? .clear, radius: 3)
+                }
+            }
+            .padding(3)
+            .background(Color(RGB(0xE6E6E3)), in: .rect(cornerRadius: 4))
+            .offset(x: -12)
+            .help(ring == nil ? tr("Los LED del anillo") : tr("Los LED del anillo, en su ajuste de un color"))
+        }
+        .contentShape(Circle())
+    }
+
+    private var cap: some View {
         ZStack {
             shell
+            if isAgent && !isFlat && lit == nil { diffuser }
+            if !isFlat && (isDial || isStick) { topMark }
+            if !isFlat && !isRound { bevel }
             if let lit { glow(lit) }
             VStack(spacing: 3) {
                 if !isRound, let icon = KeycapCatalog.icon(forCap: capID ?? "") {
@@ -964,6 +1162,27 @@ struct BoardCapView: View {
             if isSelected { selectionRing }
         }
         .frame(width: width, height: side)
+        .overlay(alignment: .topTrailing) {
+            if hasHold {
+                Circle()
+                    .fill(Color(RGB(0x121214)).opacity(0.5))
+                    .frame(width: 5, height: 5)
+                    .padding(isRound ? 8 : 6)
+                    .help(tr("Al mantenerla también hace algo"))
+            }
+        }
+        .overlay(alignment: .topLeading) {
+            if isOverridden {
+                Text("S")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 13, height: 13)
+                    .background(SystemColors.selectedRow, in: .circle)
+                    // Inside the cap: outside it, the badge lands on the case screws.
+                    .padding(isRound ? 2 : 4)
+                    .help(tr("Sobrescrita en esta app"))
+            }
+        }
         .glassCap(isFlat: isFlat, shape: shape)
         .contentShape(shape)
     }
@@ -1017,22 +1236,25 @@ struct BoardCapView: View {
             ))
         }
         if isDial {
+            // Brushed aluminium: a bright band across a grey knob.
             return AnyShapeStyle(LinearGradient(
                 stops: [
-                    .init(color: Color(RGB(0xFDFDFC)), location: 0),
-                    .init(color: Color(RGB(0xEDECE9)), location: 0.46),
-                    .init(color: Color(RGB(0xCFCEC9)), location: 1),
+                    .init(color: Color(RGB(0xC9C9C7)), location: 0),
+                    .init(color: Color(RGB(0xF3F3F1)), location: 0.38),
+                    .init(color: Color(RGB(0xB4B4B1)), location: 0.62),
+                    .init(color: Color(RGB(0x8E8E8B)), location: 1),
                 ],
-                startPoint: .topLeading, endPoint: .bottomTrailing
+                startPoint: .leading, endPoint: .trailing
             ))
         }
         if isAgent {
-            // Translucent, so an LED underneath shows through the cap.
+            // Frosted and translucent, so an LED underneath shows through the cap —
+            // greyer than the opaque white action caps, as on the clone.
             return AnyShapeStyle(LinearGradient(
                 stops: [
-                    .init(color: .white.opacity(0.90), location: 0),
-                    .init(color: Color(RGB(0xF8F8F6)).opacity(0.78), location: 0.60),
-                    .init(color: Color(RGB(0xECECE8)).opacity(0.72), location: 1),
+                    .init(color: Color(RGB(0xEEEFF0)).opacity(0.88), location: 0),
+                    .init(color: Color(RGB(0xE1E2E4)).opacity(0.80), location: 0.60),
+                    .init(color: Color(RGB(0xD2D4D6)).opacity(0.76), location: 1),
                 ],
                 startPoint: .top, endPoint: .bottom
             ))
@@ -1045,6 +1267,50 @@ struct BoardCapView: View {
             ],
             startPoint: .top, endPoint: .bottom
         ))
+    }
+
+    /**
+     The marks on the two round controls' tops: a radial line on the dial (where it
+     points), a dot on the stick's cap. The line drawing of the pad has both; without
+     them the dial and the stick are the same disc in two colours.
+     */
+    @ViewBuilder
+    private var topMark: some View {
+        if isDial {
+            Capsule()
+                .fill(Color(RGB(0x5A5A58)).opacity(0.7))
+                .frame(width: 2, height: side * 0.22)
+                .offset(y: -side * 0.30)
+        } else {
+            Circle()
+                .fill(Color.white.opacity(0.22))
+                .frame(width: 7, height: 7)
+                .offset(y: -side * 0.26)
+        }
+    }
+
+    /// The sculpted profile: a darker lip along the bottom edge, where the cap's
+    /// front face turns under.
+    private var bevel: some View {
+        RoundedRectangle(cornerRadius: 11, style: .continuous)
+            .strokeBorder(
+                LinearGradient(
+                    stops: [
+                        .init(color: .clear, location: 0.72),
+                        .init(color: .black.opacity(0.10), location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom
+                ),
+                lineWidth: 3
+            )
+            .allowsHitTesting(false)
+    }
+
+    /// The LED's diffuser, faintly visible through an unlit frosted cap.
+    private var diffuser: some View {
+        Circle()
+            .strokeBorder(Color(RGB(0x9FAAB8)).opacity(0.35), lineWidth: 1.2)
+            .frame(width: 15, height: 15)
     }
 
     /// The LED under a session cap, if it is lit.
@@ -1102,6 +1368,481 @@ struct BoardCapView: View {
 }
 
 
+
+// MARK: - Profiles, gestures and remote (F1, F2, F7)
+//
+// Subviews of the Board pane for the per-app profiles, Tap/Hold on the action caps,
+// the agent keys' Remote block and the dangerous-snippet switch. Every edit goes
+// through `SettingsEditing` and is announced with `bindingsChanged`, like the rest of
+// the pane. Colors come from the system: `SystemColors` for selection, semantic
+// styles for everything else.
+
+/// A small uppercase caption, the inspector's section label.
+private struct InspectorCaption: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold)).kerning(0.8)
+            .foregroundStyle(.tertiary)
+    }
+}
+
+/**
+ An action picker grouped under category headers, with each action's safeguards in
+ its label and, under the picker, as badges for the one chosen.
+
+ A menu item is plain text, so the badges ride in the label there ("… — requires
+ Superset · two-step confirm"); the chips below repeat them for the current choice,
+ where they have room to be read.
+ */
+struct GroupedActionPicker: View {
+    @Binding var selection: KeyAction?
+    var noneLabel: String
+    var actions: [KeyAction] = KeyAction.allCases
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Picker("", selection: $selection) {
+                Text(noneLabel).tag(KeyAction?.none)
+                ForEach(SettingsEditing.pickerSections(actions), id: \.category) { section in
+                    Section(section.title) {
+                        ForEach(section.actions, id: \.self) { action in
+                            Text(label(action)).tag(KeyAction?.some(action))
+                        }
+                    }
+                }
+            }
+            .labelsHidden()
+            if let selection {
+                ActionBadges(action: selection)
+            }
+        }
+    }
+
+    private func label(_ action: KeyAction) -> String {
+        let badges = SettingsEditing.badges(for: action)
+        return badges.isEmpty ? action.long : "\(action.long) — \(badges.joined(separator: " · "))"
+    }
+}
+
+/// The safeguards of one action, as chips.
+struct ActionBadges: View {
+    let action: KeyAction
+
+    var body: some View {
+        let badges = SettingsEditing.badges(for: action)
+        if !badges.isEmpty {
+            HStack(spacing: 5) {
+                ForEach(badges, id: \.self) { badge in
+                    Text(badge)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 7).padding(.vertical, 2)
+                        .background(.quaternary.opacity(0.6), in: .capsule)
+                }
+            }
+        }
+    }
+}
+
+/// Shown under a control a profile cannot override.
+struct SameEverywhereNote: View {
+    var body: some View {
+        Text(tr("Igual en todas las apps. Cámbialo en Todas las apps."))
+            .font(.system(size: 11)).foregroundStyle(.secondary)
+    }
+}
+
+/// Tap / Hold, for the action caps.
+struct GesturePicker: View {
+    @Binding var gesture: OpenBoardKit.Gesture
+
+    var body: some View {
+        Picker("", selection: $gesture) {
+            Text(tr("Tocar")).tag(OpenBoardKit.Gesture.tap)
+            Text(tr("Mantener")).tag(OpenBoardKit.Gesture.hold)
+        }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+    }
+}
+
+/**
+ What holding an action cap does, and how long "held" is.
+
+ In a profile the binding is an override of the base one; the threshold is one value
+ for every cap and every app, so it is always editable here.
+ */
+struct HoldSection: View {
+    @EnvironmentObject private var board: BoardModel
+    @Environment(\.boardCommands) private var commands
+    let cell: BoardCell
+    let context: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            InspectorCaption(tr("AL MANTENER ESTA TECLA"))
+            if let context {
+                ProfileOverrideRow(control: .action(cell.id), gesture: .hold, profile: context, noneLabel: tr("nada"))
+            } else {
+                GroupedActionPicker(selection: holdBinding, noneLabel: tr("nada"))
+            }
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                InspectorCaption(tr("SE MANTIENE TRAS"))
+                Spacer()
+                Text(tr("%ld ms", board.preferences.actionLongPressMs))
+                    .font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+            }
+            Slider(
+                value: thresholdBinding,
+                in: Double(SettingsEditing.longPressRange.lowerBound)...Double(SettingsEditing.longPressRange.upperBound),
+                step: 50
+            )
+            Text(tr("Una tecla con acción al mantener espera este tiempo antes de tocar; una sin ella toca al instante."))
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var holdBinding: Binding<KeyAction?> {
+        Binding(
+            get: {
+                ProfileResolver.resolve(.action(cell.id), .hold, frontBundleID: nil, prefs: board.preferences).action
+            },
+            set: { action in
+                board.updatePreferences {
+                    SettingsEditing.setAction(action, for: .action(cell.id), gesture: .hold, profile: nil, in: &$0)
+                }
+                commands.bindingsChanged()
+            }
+        )
+    }
+
+    private var thresholdBinding: Binding<Double> {
+        Binding(
+            get: { Double(board.preferences.actionLongPressMs) },
+            set: { ms in
+                board.updatePreferences { SettingsEditing.setLongPressMs(Int(ms.rounded()), in: &$0) }
+                commands.bindingsChanged()
+            }
+        )
+    }
+}
+
+/**
+ One control inside an app profile: the inherited binding greyed with "Override", or
+ the profile's own with "Inherit again".
+
+ Overriding starts from the inherited action, so pressing the button changes nothing
+ until a new action is picked — the profile simply starts owning the binding.
+ */
+struct ProfileOverrideRow: View {
+    @EnvironmentObject private var board: BoardModel
+    @Environment(\.boardCommands) private var commands
+    let control: PadControl
+    let gesture: OpenBoardKit.Gesture
+    let profile: String
+    var noneLabel: String
+    var actions: [KeyAction] = KeyAction.allCases
+
+    var body: some View {
+        let overridden = SettingsEditing.isOverridden(control, gesture: gesture, profile: profile, in: board.preferences)
+        VStack(alignment: .leading, spacing: 5) {
+            if overridden {
+                GroupedActionPicker(selection: ownBinding, noneLabel: noneLabel, actions: actions)
+                Button(tr("Heredar de nuevo")) {
+                    board.updatePreferences {
+                        SettingsEditing.clearOverride(control, gesture: gesture, profile: profile, in: &$0)
+                    }
+                    commands.bindingsChanged()
+                }
+                .controlSize(.small)
+            } else {
+                HStack(spacing: 8) {
+                    Text(inheritedLabel)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Spacer(minLength: 4)
+                    Button(tr("Sobrescribir")) {
+                        let current = resolved.action
+                        board.updatePreferences {
+                            SettingsEditing.setAction(current, for: control, gesture: gesture, profile: profile, in: &$0)
+                        }
+                        commands.bindingsChanged()
+                    }
+                    .controlSize(.small)
+                }
+                Text(tr("Heredado de Todas las apps."))
+                    .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+            }
+        }
+    }
+
+    private var resolved: Resolved {
+        ProfileResolver.resolve(control, gesture, frontBundleID: profile, prefs: board.preferences)
+    }
+
+    private var inheritedLabel: String {
+        resolved.action?.long ?? noneLabel
+    }
+
+    private var ownBinding: Binding<KeyAction?> {
+        Binding(
+            get: { resolved.action },
+            set: { action in
+                board.updatePreferences {
+                    SettingsEditing.setAction(action, for: control, gesture: gesture, profile: profile, in: &$0)
+                }
+                commands.bindingsChanged()
+            }
+        )
+    }
+}
+
+/**
+ Which app the Board pane is editing: "All apps" (the base bindings) or one app's
+ profile, with "+" to add a profile for a running app.
+
+ The "+" menu lists running apps rather than "the app in front": with this window
+ open, the app in front is OpenBoard.
+ */
+struct ProfileContextBar: View {
+    @EnvironmentObject private var board: BoardModel
+    @Environment(\.boardCommands) private var commands
+    @Binding var context: String?
+
+    var body: some View {
+        // Wraps rather than truncating: every app with a profile adds a chip.
+        WrappingHStack(spacing: 6, lineSpacing: 6) {
+            Text(tr("CONTEXTO"))
+                .font(.system(size: 10, weight: .semibold)).kerning(0.8)
+                .foregroundStyle(.tertiary)
+            chip(tr("Todas las apps"), selected: context == nil) { context = nil }
+            ForEach(SettingsEditing.profileOrder(board.preferences), id: \.self) { bundle in
+                chip(Self.appName(bundle), selected: context == bundle) { context = bundle }
+                    .contextMenu {
+                        Button(tr("Quitar perfil")) {
+                            if context == bundle { context = nil }
+                            board.updatePreferences { SettingsEditing.removeProfile(bundleID: bundle, in: &$0) }
+                            commands.bindingsChanged()
+                        }
+                    }
+            }
+            Menu {
+                let candidates = runningApps
+                if candidates.isEmpty {
+                    Text(tr("No hay ninguna otra app abierta"))
+                }
+                ForEach(candidates, id: \.bundle) { app in
+                    Button(app.name) {
+                        board.updatePreferences { SettingsEditing.addProfile(bundleID: app.bundle, in: &$0) }
+                        commands.bindingsChanged()
+                        context = app.bundle
+                    }
+                }
+            } label: {
+                Image(systemName: "plus")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(tr("Añadir un perfil para una app"))
+        }
+    }
+
+    private func chip(_ title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .lineLimit(1)
+                .fixedSize()
+                .font(.system(size: 11.5, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Color.primary : Color.secondary)
+                .padding(.horizontal, 9).padding(.vertical, 4)
+                .background(
+                    selected
+                        ? AnyShapeStyle(SystemColors.selectedRow.opacity(0.28))
+                        : AnyShapeStyle(.quaternary.opacity(0.45)),
+                    in: .capsule
+                )
+                .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Regular apps that are running and have no profile yet, by name.
+    private var runningApps: [(bundle: String, name: String)] {
+        let own = Bundle.main.bundleIdentifier
+        var seen = Set(board.preferences.profiles.keys)
+        var out: [(bundle: String, name: String)] = []
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+            guard let bundle = app.bundleIdentifier, bundle != own, !seen.contains(bundle) else { continue }
+            seen.insert(bundle)
+            out.append((bundle, app.localizedName ?? bundle))
+        }
+        return out.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    static func appName(_ bundle: String) -> String {
+        if bundle == Preferences.supersetBundleID { return "Superset" }
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundle) {
+            return FileManager.default.displayName(atPath: url.path)
+                .replacingOccurrences(of: ".app", with: "")
+        }
+        return bundle
+    }
+}
+
+/**
+ An agent key's Remote block: how a send is aimed at it and what it sends.
+
+ The gesture wording follows `targeted.mode` (D10). "Only to an agent that has
+ stopped" is shown as a fixed rule — it is `requireStopForSend`, a safety rule rather
+ than a preference, so there is no control for it.
+ */
+struct RemoteBlock: View {
+    @EnvironmentObject private var board: BoardModel
+
+    var body: some View {
+        let targeted = board.preferences.targeted
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                InspectorCaption(tr("REMOTO"))
+                Text(targeted.mode == .armed ? tr("armado") : tr("acorde"))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(.quaternary.opacity(0.5), in: .capsule)
+                Spacer(minLength: 0)
+            }
+            ActionBadges(action: .targetedArm)
+            Text(SettingsEditing.remoteGesture(for: targeted.mode))
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 5) {
+                Text(tr("Envía"))
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(targeted.defaultSnippet)
+                    .font(.system(size: 11.5).monospaced())
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 5))
+            }
+            Label(tr("Solo a un agente que se haya detenido."), systemImage: "lock.fill")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/**
+ A snippet that `SnippetGuard` would block: say so, and offer the switch that lets it
+ through — behind a confirmation, because the key that typed `/clear` into the wrong
+ window is why the guard exists.
+ */
+struct DangerousSnippetWarning: View {
+    @EnvironmentObject private var board: BoardModel
+    @Environment(\.boardCommands) private var commands
+    let text: String
+    @State private var confirming = false
+
+    var body: some View {
+        let allowed = board.preferences.snippetsAllowDangerous
+        if case let .block(reason) = SnippetGuard.check(text, allowDangerous: false) {
+            VStack(alignment: .leading, spacing: 6) {
+                Label(
+                    allowed ? tr("Permitido: %@", reason) : tr("Bloqueado: %@", reason),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(allowed ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
+                .fixedSize(horizontal: false, vertical: true)
+                Toggle(tr("Permitir comandos peligrosos"), isOn: allowBinding)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .font(.system(size: 11.5))
+            }
+            .confirmationDialog(
+                tr("¿Permitir que los textos escriban comandos destructivos?"),
+                isPresented: $confirming,
+                titleVisibility: .visible
+            ) {
+                Button(tr("Permitir"), role: .destructive) { setAllowed(true) }
+                Button(tr("Cancelar"), role: .cancel) {}
+            } message: {
+                Text(tr("Se aplica a todas las teclas de texto. Una tecla que escribe /clear en la ventana equivocada no se puede deshacer."))
+            }
+        }
+    }
+
+    private var allowBinding: Binding<Bool> {
+        Binding(
+            get: { board.preferences.snippetsAllowDangerous },
+            set: { on in
+                if on { confirming = true } else { setAllowed(false) }
+            }
+        )
+    }
+
+    private func setAllowed(_ on: Bool) {
+        board.updatePreferences { SettingsEditing.setAllowDangerousSnippets(on, in: &$0) }
+        commands.bindingsChanged()
+    }
+}
+
+/**
+ Left to right, wrapping onto a new line when the next item does not fit. Items keep
+ their ideal size — a chip is never squeezed into "Goo…".
+ */
+struct WrappingHStack: Layout {
+    var spacing: CGFloat = 6
+    var lineSpacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        let width = rows.map(\.width).max() ?? 0
+        let height = rows.map(\.height).reduce(0, +) + lineSpacing * CGFloat(max(rows.count - 1, 0))
+        return CGSize(width: proposal.width.map { min($0, width) } ?? width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in arrange(width: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for index in row.items {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y + (row.height - size.height) / 2),
+                    proposal: ProposedViewSize(size)
+                )
+                x += size.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+
+    private struct Row { var items: [Int] = []; var width: CGFloat = 0; var height: CGFloat = 0 }
+
+    private func arrange(width: CGFloat, subviews: Subviews) -> [Row] {
+        var rows: [Row] = [Row()]
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let added = rows[rows.count - 1].items.isEmpty ? size.width : rows[rows.count - 1].width + spacing + size.width
+            if added > width, !rows[rows.count - 1].items.isEmpty {
+                rows.append(Row(items: [index], width: size.width, height: size.height))
+            } else {
+                rows[rows.count - 1].items.append(index)
+                rows[rows.count - 1].width = added
+                rows[rows.count - 1].height = max(rows[rows.count - 1].height, size.height)
+            }
+        }
+        return rows
+    }
+}
+
+// MARK: - End profiles, gestures and remote
 
 /**
  One harness in the sidebar: its mark, its name, and whether it is reporting.

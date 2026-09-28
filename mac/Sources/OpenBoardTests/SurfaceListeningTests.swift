@@ -191,7 +191,7 @@ func runSurfaceListeningTests() {
     }
 
     test("a muted row stops claiming a jump it will not perform") {
-        expect(pane.contains("Not listening — sessions here get no key."))
+        expect(pane.contains("Sin escuchar — las sesiones de aquí no reciben tecla."))
     }
 
     test("the controller enforces the switch on both paths, and sweeps after") {

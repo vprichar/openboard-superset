@@ -36,18 +36,20 @@ struct NotReadyView: View {
                 .font(.system(size: 30, weight: .light))
                 .foregroundStyle(.tertiary)
 
-            Text("Finish setting up first")
+            Text(tr("Termina la configuración primero"))
                 .font(.system(size: 15, weight: .semibold))
 
-            Text("\(purpose) is saved, but nothing will show on the pad until OpenBoard "
-                 + "has what it needs. \(remaining)")
+            Text(tr(
+                "%@ se guarda, pero no se verá nada en el pad hasta que OpenBoard tenga lo que necesita. %@",
+                purpose, remaining
+            ))
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 380)
 
-            Button("Open setup") { openSetup() }
+            Button(tr("Abrir configuración")) { openSetup() }
                 .controlSize(.large)
                 .padding(.top, 2)
         }
@@ -61,17 +63,17 @@ struct NotReadyView: View {
         let missing = SetupProgress.Step.allCases
             .filter { $0.isRequired && !progress.isDone($0) }
         guard !missing.isEmpty else { return "" }
-        return "Still needed: \(missing.map(label).joined(separator: ", "))."
+        return tr("Falta: %@.", missing.map(label).joined(separator: ", "))
     }
 
     private func label(_ step: SetupProgress.Step) -> String {
         switch step {
-        case .inputMonitoring: "Input Monitoring"
-        case .accessibility: "Accessibility"
-        case .automation: "Automation"
-        case .calibration: "Key order"
-        case .hooks: "Claude Code hooks"
-        case .openAtLogin: "Open at login"
+        case .inputMonitoring: tr("Monitorización de entrada")
+        case .accessibility: tr("Accesibilidad")
+        case .automation: tr("Automatización")
+        case .calibration: tr("orden de teclas")
+        case .hooks: tr("hooks de Claude Code")
+        case .openAtLogin: tr("abrir al iniciar sesión")
         }
     }
 }

@@ -264,7 +264,9 @@ public enum KeycapCatalog {
         Keycap(id: "PLAY", icon: "play-outline", isDouble: false),
         Keycap(id: "GIT", icon: "diff", isDouble: false),
         Keycap(id: "BRCH", icon: "pull-request-draft", isDouble: false),
-        Keycap(id: "BRANCH", icon: "branch", isDouble: false),
+        // The physical cap: a line forking up-right and down-right, the same glyph
+        // as SPLIT — not the git-branch dots, which no cap on the clone carries.
+        Keycap(id: "BRANCH", icon: "worktree", isDouble: false),
         Keycap(id: "MRG", icon: "pull-request-merged", isDouble: false),
         Keycap(id: "PR", icon: "pull-request", isDouble: false),
         Keycap(id: "PAINT", icon: "paint", isDouble: false),
@@ -286,6 +288,13 @@ public enum KeycapCatalog {
         Keycap(id: "EMPT5", icon: "empty", isDouble: true)
     ]
 
+    /// The caps the settings window offers: those with a glyph. The catalog keeps the
+    /// blank moulds (`EMPT1`…, `YOLO`, `YEET`) because the hardware ships them, but a
+    /// picker full of empty squares reads as icons that failed to load.
+    public static var selectable: [Keycap] {
+        caps.filter { icons[$0.icon] != nil }
+    }
+
     public static func cap(id: String) -> Keycap? {
         caps.first { $0.id == id }
     }
@@ -303,6 +312,8 @@ public enum KeycapCatalog {
         "ACT08": "MAGIC",
         "ACT09": "TERM",
         "ACT10": "MIC",
+        // The clone's pencil key.
+        "ACT11": "NEW",
         "ACT12": "PARTY",
         "ENC": "SETUP",
     ]
