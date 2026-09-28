@@ -1,5 +1,12 @@
 # OpenBoard · edición para clon del Codex Micro + Superset
 
+[English](README.en.md) · **Español**
+
+> **English:** OpenBoard fork for the AliExpress **Codex Micro clone** ("XiaMi Lab | AI Micro",
+> "Project2077", USB `303A:8360`), integrated with Superset: workspace-aware session keys, tap
+> and hold, per-app profiles, color themes and a Spanish/English UI.
+> [Read the English README →](README.en.md)
+
 Fork de [OpenBoard](https://github.com/camwilso/openboard) de Cam Wilson, adaptado a un teclado
 **clon** del Codex Micro («Project2077», USB `303A:8360`) y a
 **Superset**, donde corren varias sesiones de código a la vez.
