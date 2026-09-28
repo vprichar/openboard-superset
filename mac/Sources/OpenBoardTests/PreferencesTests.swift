@@ -27,6 +27,21 @@ func runPreferencesTests() {
         expectEqual(Preferences.merging(raw).customThemes, [mine])
     }
 
+    test("preferences: animationSpeed defaults to fast, round-trips, and absent or unknown means the default") {
+        expectEqual(Preferences.default.animationSpeed, .fast)
+        expectEqual(Preferences.merging([:]).animationSpeed, .fast, "absent")
+        expectEqual(Preferences.merging(["animationSpeed": "warp"]).animationSpeed, .fast, "unknown")
+        for speed in AnimationSpeed.allCases {
+            var p = Preferences.default
+            p.animationSpeed = speed
+            let data = try! JSONSerialization.data(withJSONObject: p.json)
+            let json = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+            expectEqual(json["animationSpeed"] as? String, speed.rawValue)
+            expectEqual(Preferences.merging(json).animationSpeed, speed)
+        }
+        expectEqual(AnimationSpeed.allCases.map(\.rawValue), ["normal", "fast", "very-fast"])
+    }
+
     func tempURL() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("ob-config-\(UUID().uuidString).json")

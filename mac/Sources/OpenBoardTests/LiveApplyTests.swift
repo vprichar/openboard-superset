@@ -129,4 +129,18 @@ func runLiveApplyTests() {
         expect(!there.longPressKeys.contains("ACT09"), "unbound in that app: tap on the way down")
         expect(there.hold("ACT09") == nil)
     }
+
+    test("live apply: question mode swaps the stick for arrows and nothing else") {
+        let profile = ControlMap.make(prefs: .default, frontBundleID: superset)
+        let asking = ControlMap.make(prefs: .default, frontBundleID: superset, questionMode: true)
+        expectEqual(asking.joystick[.up]?.action, .arrowUp)
+        expectEqual(asking.joystick[.down]?.action, .arrowDown)
+        expectEqual(asking.joystick[.left]?.action, .arrowLeft)
+        expectEqual(asking.joystick[.right]?.action, .arrowRight)
+        expectEqual(asking.joystick[.right]?.payloadKey, "JOY.right")
+        var same = asking
+        same.joystick = profile.joystick
+        expectEqual(same, profile, "taps, holds and the dial are untouched")
+        expectEqual(ControlMap.make(prefs: .default, frontBundleID: superset, questionMode: false), profile)
+    }
 }

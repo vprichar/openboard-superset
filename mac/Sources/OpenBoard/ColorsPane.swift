@@ -202,6 +202,12 @@ struct ColorsPane: View {
                 PaneHeader(tr("Cuánto dura un color"), tr("Cuándo borra el tablero un color por su cuenta."))
                 holdSection
 
+                PaneHeader(
+                    tr("Velocidad de las luces"),
+                    tr("Cuánto tarda en verse un cambio de color y cuánto duran las vueltas del anillo.")
+                )
+                speedSection
+
                 PaneHeader(tr("El anillo"), tr("La luz exterior, que resume todo el tablero."))
                 ringSection
 
@@ -256,6 +262,36 @@ struct ColorsPane: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 2)
         .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
+    }
+
+    /// A factor applied when painting: the colors above are never rewritten by it.
+    private var speedSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Picker("", selection: animationSpeedBinding) {
+                Text(tr("Normal")).tag(AnimationSpeed.normal)
+                Text(tr("Rápida")).tag(AnimationSpeed.fast)
+                Text(tr("Muy rápida")).tag(AnimationSpeed.veryFast)
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 320)
+
+            Text(tr("Al cambiar de estado, la tecla destella su color nuevo un instante."))
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(.quaternary.opacity(0.3), in: .rect(cornerRadius: 10))
+    }
+
+    private var animationSpeedBinding: Binding<AnimationSpeed> {
+        Binding(
+            get: { board.preferences.animationSpeed },
+            set: { speed in
+                board.updatePreferences { $0.animationSpeed = speed }
+                commands.bindingsChanged()
+            }
+        )
     }
 
     private var holdSection: some View {

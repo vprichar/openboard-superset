@@ -56,7 +56,12 @@ final class BoardController: ObservableObject {
      translated through it back to a registry slot, so the two cannot disagree about
      which session a lit key means.
      */
-    private(set) var padView = PadView()
+    private(set) var padView = PadView() {
+        didSet { refreshQuestionMode(padView) }
+    }
+    /// The visible session waiting on a prompt that has the stick sending bare arrows,
+    /// if any (`QuestionMode`).
+    private var questionTrigger: QuestionMode.Trigger?
     /// Which sessions the pad is showing. `.all` until Superset says otherwise.
     private var boardContext: BoardContext = .all
     /// Which app is in front, as far as the pad's context is concerned.
@@ -138,6 +143,11 @@ final class BoardController: ObservableObject {
     /// What the last successful paint put on the keys and ring, so a bus event that
     /// changes nothing visible costs no write at all.
     private var lastPaintedLooks: [Int: Appearance]?
+    /// A key that changed state shows its new color solid for a moment — `StateFlash`.
+    private var stateFlash = StateFlash()
+    /// The repaint that ends the flash in progress, and when it is due.
+    private var flashEndTask: Task<Void, Never>?
+    private var flashEndsAt: Date?
     private var lastPaintedRing: [SessionState?]?
     /// Accumulated so one turn logs one line rather than one per tick.
     private var scrolledLines = 0
@@ -515,7 +525,9 @@ final class BoardController: ObservableObject {
         let prefs = model.preferences
         // `settings`, not `preferences`: the tap bindings the UI edits live in the
         // model's mirrored state until they are folded back.
-        controlMap = ControlMap.make(prefs: model.settings, frontBundleID: frontBundleID)
+        controlMap = ControlMap.make(
+            prefs: model.settings, frontBundleID: frontBundleID, questionMode: questionTrigger != nil
+        )
         // Replaces every binding and clears the debounce history, so a rebind is not
         // swallowed by the previous binding's window.
         controlMap.configure(&dispatcher)
@@ -539,7 +551,9 @@ final class BoardController: ObservableObject {
     /// debounce history and a press in flight are kept, because switching apps is not
     /// an edit and must not eat a keypress.
     private func frontProfileChanged() {
-        let next = ControlMap.make(prefs: model.settings, frontBundleID: frontBundleID)
+        let next = ControlMap.make(
+            prefs: model.settings, frontBundleID: frontBundleID, questionMode: questionTrigger != nil
+        )
         guard next != controlMap else { return }
         controlMap = next
         dispatcher.longPressKeys = next.longPressKeys
@@ -547,6 +561,46 @@ final class BoardController: ObservableObject {
             "profile: \(frontBundleID.flatMap { model.preferences.profiles[$0] != nil ? $0 : nil } ?? "base")"
                 + " — holds on \(next.longPressKeys.sorted().joined(separator: ","))"
         )
+    }
+
+    /**
+     A visible session started or stopped waiting on a prompt: swap the stick between
+     bare arrows and the profile. Only the joystick changes — the taps, holds and the
+     dispatcher's state are left exactly as they are.
+     */
+    private func refreshQuestionMode(_ view: PadView) {
+        let trigger = QuestionMode.next(
+            current: questionTrigger, entries: registry.entries, padKeys: view.keys, overflowKey: view.overflowKey
+        )
+        guard (trigger != nil) != (questionTrigger != nil) else {
+            questionTrigger = trigger
+            return
+        }
+        questionTrigger = trigger
+        controlMap.joystick = ControlMap.make(
+            prefs: model.settings, frontBundleID: frontBundleID, questionMode: trigger != nil
+        ).joystick
+        Log.write(QuestionMode.logLine(trigger))
+    }
+
+    /// Question mode as of now: the pad may not have been repainted since the prompt
+    /// appeared or was answered.
+    private func currentQuestion() -> QuestionMode.Trigger? {
+        refreshQuestionMode(composePadView())
+        return questionTrigger
+    }
+
+    /// FAST and CODEX while a prompt waits: logged and dropped (`QuestionMode.ignoredCaps`).
+    private func ignoredInQuestionMode(_ cap: String) -> Bool {
+        guard QuestionMode.ignores(cap: cap, active: currentQuestion() != nil) else { return false }
+        Log.write(QuestionMode.ignoredLogLine(cap: cap))
+        return true
+    }
+
+    /// Space or Tab from the dial, in question mode.
+    private func sendQuestionKey(_ shortcut: Shortcut, from control: String) {
+        let result = Actions.press(shortcut)
+        Log.write(result.ok ? "key \(control): \(shortcut.key) (question mode)" : "key \(control): \(result.detail)")
     }
 
     private func cancelHoldTimers() {
@@ -717,7 +771,10 @@ final class BoardController: ObservableObject {
             handleTargeting(step)
             return
         }
-        // Per app: with Superset in front the stick switches workspaces and tabs.
+        // The pad may not have been repainted since the prompt appeared or was answered.
+        refreshQuestionMode(composePadView())
+        // Per app: with Superset in front the stick switches workspaces and tabs —
+        // unless a visible session is waiting on a prompt, then it sends bare arrows.
         let resolved = controlMap.joystick[direction]
         guard let resolved, let action = resolved.action else {
             Log.write("stick \(direction.rawValue): unbound")
@@ -752,6 +809,7 @@ final class BoardController: ObservableObject {
             // workspace's first session, wherever it sits in the registry.
             jump(fromPadKey: key)
         case let .action(action, key):
+            if ignoredInQuestionMode(key) { return }
             perform(action, key: key)
         case .encoderPressed:
             encoderPressed()
@@ -771,6 +829,14 @@ final class BoardController: ObservableObject {
                 Task { await paint() }
             }
         case let .scroll(lines):
+            // In question mode a detent is one arrow through the options — except on a
+            // plan, which has to be scrolled to be read.
+            if let question = currentQuestion(),
+               case let .arrow(direction) = QuestionMode.dial(.turn(lines: lines), pendingTool: question.pendingTool) {
+                let result = Actions.arrow(direction)
+                Log.write(result.ok ? "key ENC: arrow \(direction.rawValue) (question mode)" : "key ENC: \(result.detail)")
+                return
+            }
             Actions.scroll(lines: lines)
             noteScroll(lines)
         }
@@ -840,7 +906,15 @@ final class BoardController: ObservableObject {
                 return
             }
             let decision: Actions.Decision = action == .approve ? .approve : .reject
-            let outcome = Actions.respond(decision, slots: model.slots)
+            // In question mode the answer goes to the session the stick is moving
+            // through, even with another waiting too. It does not end the mode: only
+            // the hook saying the session moved on does (`QuestionMode.next`).
+            var slots = model.slots
+            if let target = QuestionMode.answerTarget(for: action, trigger: currentQuestion()) {
+                slots = slots.filter { $0.sessionID == target }
+                Log.write("key \(key): question mode — answering \(target.prefix(8))")
+            }
+            let outcome = Actions.respond(decision, slots: slots)
             switch outcome {
             case let .sent(slot):
                 Log.write("key \(key): \(action.rawValue) sent to \(describeKey(slot: slot))")
@@ -1275,8 +1349,8 @@ final class BoardController: ObservableObject {
      `state` is the session's own, before the focus overlay: the transition asks it
      whether a key needs a human.
      */
-    private func keyLooks() -> [Int: (look: Appearance, state: SessionState?)] {
-        var looks: [Int: (look: Appearance, state: SessionState?)] = [:]
+    private func keyLooks() -> [Int: (look: Appearance, state: SessionState?, sessionID: String?)] {
+        var looks: [Int: (look: Appearance, state: SessionState?, sessionID: String?)] = [:]
         for key in 1...BoardLayout.slotCount {
             let entry = padView.sessionID(forKey: key).flatMap { registry.entry(forSession: $0) }
             // A free slot and a finished session both mean "nothing to look at".
@@ -1293,7 +1367,9 @@ final class BoardController: ObservableObject {
             if key == padView.overflowKey {
                 look = OverflowLook.appearance(look, settings: model.preferences.overflow)
             }
-            looks[key] = (look, entry?.state)
+            // How fast it moves is a factor applied here, never written into the colors.
+            look = model.preferences.animationSpeed.look(look)
+            looks[key] = (look, entry?.state, entry?.sessionID)
         }
         return looks
     }
@@ -2053,6 +2129,11 @@ final class BoardController: ObservableObject {
             guard let self else { return }
             try? await Task.sleep(for: .seconds(self.encoderClick.threshold))
             guard !Task.isCancelled, self.encoderClick.shouldFireLong() else { return }
+            if let question = self.currentQuestion(),
+               case let .key(tab) = QuestionMode.dial(.hold, pendingTool: question.pendingTool) {
+                self.sendQuestionKey(tab, from: "ENC")
+                return
+            }
             // Per app: with Superset in front the hold opens its command palette.
             let long = self.controlMap.encoderLong
             guard let action = long.action else { return }
@@ -2093,6 +2174,10 @@ final class BoardController: ObservableObject {
 
     private func fire(_ emit: ActionPressTracker.Emit, stillDown: Bool) {
         switch emit {
+        case let .tap(cap), let .hold(cap):
+            if ignoredInQuestionMode(cap) { return }
+        }
+        switch emit {
         case let .tap(cap):
             guard let action = controlMap.taps[cap] else {
                 Log.write("key \(cap): unassigned")
@@ -2114,6 +2199,11 @@ final class BoardController: ObservableObject {
         encoderHoldTask = nil
         switch encoderClick.release() {
         case .short:
+            if let question = currentQuestion(),
+               case let .key(space) = QuestionMode.dial(.click, pendingTool: question.pendingTool) {
+                sendQuestionKey(space, from: "ENC")
+                return
+            }
             guard let action = model.preferences.encoder.click else { return }
             perform(action, key: "ENC")
         case .handled, .spurious:
@@ -3146,7 +3236,14 @@ final class BoardController: ObservableObject {
             // Counted, because "every key went dark" and "the app wrote every key and
             // the pad ignored it" look identical from the outside and have completely
             // different causes.
-            let looks = keyLooks().mapValues(\.look)
+            // A key whose session just changed state flashes its new color, in this same
+            // write; the repaint that ends the flash is scheduled once it has landed.
+            let own = keyLooks()
+            let looks = stateFlash.apply(
+                own.mapValues(\.look),
+                states: own.mapValues { StateFlash.Key($0.sessionID, $0.state) },
+                now: Date()
+            )
             let keys = PadPaint.keyBatch(looks, calibration: calibration, transport: device)
             batch += keys.batch
             written = keys.written
@@ -3156,6 +3253,7 @@ final class BoardController: ObservableObject {
             painted = (written, skipped)
             lastPaintedLooks = looks
             lastPaintedRing = padView.ringStates
+            scheduleFlashEnd()
         } catch {
             // Never throw out of the loop: a failed repaint is a missed light, but a
             // dead loop is a board that stays wrong until someone restarts the app.
@@ -3200,6 +3298,24 @@ final class BoardController: ObservableObject {
                 + (painted.skipped > 0 ? ", \(painted.skipped) uncalibrated" : "")
                 + " (\(registry.entries.count) sessions)"
         )
+    }
+
+    /**
+     Repaint when the flash in progress ends, so the keys go back to their own looks on
+     the next step. One task per deadline: keys that joined the flash moved it, and the
+     old task is dropped rather than left to repaint early.
+     */
+    private func scheduleFlashEnd() {
+        guard let until = stateFlash.until, until != flashEndsAt else { return }
+        flashEndsAt = until
+        flashEndTask?.cancel()
+        flashEndTask = Task { [weak self] in
+            let wait = max(until.timeIntervalSinceNow, 0)
+            try? await Task.sleep(for: .milliseconds(Int(wait * 1000) + 10))
+            guard let self, !Task.isCancelled else { return }
+            self.flashEndsAt = nil
+            await self.paint()
+        }
     }
 
     // MARK: - commands
@@ -3253,6 +3369,8 @@ final class BoardController: ObservableObject {
      */
     @discardableResult
     func play(show: Show, priority: ShowPriority? = nil) -> Bool {
+        // The event laps and the workspace sweep run at the configured speed.
+        let show = Shows.paced(show, speed: model.preferences.animationSpeed)
         let rank = priority ?? ShowPriority.of(showNamed: show.name)
         let decision = ShowArbiter.decide(
             incoming: rank,

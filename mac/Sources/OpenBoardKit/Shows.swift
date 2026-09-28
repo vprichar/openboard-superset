@@ -234,6 +234,38 @@ extension Shows {
     }
 }
 
+/// How fast the event laps run (`AnimationSpeed`).
+extension Shows {
+    /// The laps a board event fires, and the workspace switch's. Only these are paced:
+    /// the others are picked by hand, or last exactly as long as a window they show.
+    public static let pacedNames: Set<String> = ["completion", "question", "error", "workspace"]
+
+    /**
+     A lap `speed.factor` times shorter: every step's duration divided by it, and each
+     animated step's speed multiplied by it (clamped to 1), so a one-lap snake is
+     still one lap. Any other show comes back unchanged.
+     */
+    public static func paced(_ show: Show, speed: AnimationSpeed) -> Show {
+        guard speed != .normal, pacedNames.contains(show.name) else { return show }
+        let steps = show.steps.map { step in
+            var side = step.side
+            if side.s > 0, let effect = CodexProtocol.Effect(rawValue: side.e) {
+                side = CodexProtocol.LightingSide(
+                    color: RGB(side.c), brightness: side.b, effect: effect, speed: side.s * speed.factor
+                )
+            }
+            return Show.Step(
+                side: side,
+                milliseconds: max(Int((Double(step.milliseconds) / speed.factor).rounded()), 1)
+            )
+        }
+        return Show(
+            name: show.name, label: show.label, description: show.description,
+            auto: show.auto, steps: steps
+        )
+    }
+}
+
 /// Answers to a key press (F4, F5): built per use from the settings, not in `all`.
 extension Shows {
     /// Amber, and not the awaiting orange: "that did nothing", not "someone is waiting".

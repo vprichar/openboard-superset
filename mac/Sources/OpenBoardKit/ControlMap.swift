@@ -11,7 +11,8 @@ import Foundation
  gives back exactly the previous map.
 
  Taps are never per-app (see `ProfileResolver`); the joystick, the encoder's long
- press and the caps' long presses are.
+ press and the caps' long presses are. `questionMode` turns the joystick into bare
+ arrows while a visible session waits on a prompt, and touches nothing else.
  */
 public struct ControlMap: Equatable, Sendable {
     /// What each action cap does on a tap, plus `ENC`. Unassigned caps are absent.
@@ -64,7 +65,9 @@ public struct ControlMap: Equatable, Sendable {
         self.clockwiseScrollsUp = clockwiseScrollsUp
     }
 
-    public static func make(prefs: Preferences, frontBundleID: String? = nil) -> ControlMap {
+    public static func make(
+        prefs: Preferences, frontBundleID: String? = nil, questionMode: Bool = false
+    ) -> ControlMap {
         let caps = BoardLayout.cells.filter(\.isAction).map(\.id)
 
         var taps: [String: KeyAction] = [:]
@@ -83,7 +86,8 @@ public struct ControlMap: Equatable, Sendable {
         var joystick: [Joystick.Direction: Resolved] = [:]
         for direction in Joystick.Direction.allCases {
             joystick[direction] = ProfileResolver.resolve(
-                .joystick(direction), .tap, frontBundleID: frontBundleID, prefs: prefs
+                .joystick(direction), .tap, frontBundleID: frontBundleID, prefs: prefs,
+                questionMode: questionMode
             )
         }
 

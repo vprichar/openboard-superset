@@ -56,6 +56,10 @@ envelope); this fork does.
 - **Repeating shortcuts** (for example, Escape ×2 in a single press).
 - **A microphone key that actually works**: it holds the configured dictation key, with
   autorepeat like a real keyboard.
+- **Answer questions from the pad alone (question mode)**: when a visible session asks you
+  something, the joystick sends arrows, the dial moves between options (click = Space to tick,
+  hold = Tab), APPR/REJ answer that session and FAST/CODEX are disabled so nothing is approved
+  or cancelled by accident. It turns itself off once you answer.
 - **Safety**: blocks dangerous snippets (`/clear`, `/exit`…), never sends ⏎ blind right after a
   snippet, and at launch does not trust saved lights until they are confirmed.
 
@@ -69,6 +73,8 @@ envelope); this fork does.
 - **Your own themes**: save, duplicate, rename, delete, import and export as JSON
   ([format](docs/teclado/formato-temas.md), in Spanish).
 - Choosing a theme plays it on the pad for a few seconds before applying it.
+- **Fast lights**: a full-brightness flash when a state changes, shorter edge animations and an
+  adjustable speed (normal, fast, very fast).
 - [**Palette designer**](docs/teclado/disenador-paletas.html): a page to design a theme on a
   drawing of the pad, with the rules checked live, and export it.
 

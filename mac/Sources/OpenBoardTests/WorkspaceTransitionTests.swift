@@ -567,4 +567,108 @@ func runWorkspaceTransitionTests() {
         expect(kept.overflowKey == nil)
         expect(kept.keys[6] == nil)
     }
+
+    // MARK: - the state flash and the animation speed
+
+    let orange = Appearance(color: RGB(0xFF6A00), effect: .shallowBreath, brightness: 0.95, speed: 0.75)
+    let blue = Appearance(color: RGB(0x0C47E9), effect: .shallowBreath, brightness: 0.75, speed: 0.45)
+    let green = Appearance(color: RGB(0x09B821), effect: .shallowBreath, brightness: 0.7, speed: 0.25)
+    func solid(_ look: Appearance) -> Appearance {
+        Appearance(color: look.color, effect: .solid, brightness: 1, speed: 0)
+    }
+    func at(_ ms: Int) -> Date { t0.addingTimeInterval(Double(ms) / 1000) }
+
+    test("flash: a key that changes state shows its new color solid at full brightness") {
+        var flash = StateFlash()
+        _ = flash.apply([1: blue, 2: blue], states: [1: .init("a", .working), 2: .init("b", .working)], now: at(0))
+        let out = flash.apply([1: orange, 2: blue], states: [1: .init("a", .awaiting), 2: .init("b", .working)], now: at(500))
+        expectEqual(out[1], solid(orange))
+        expectEqual(out[2], blue, "unchanged key keeps its look")
+        expectEqual(flash.until, at(850), "~350 ms")
+    }
+
+    test("flash: the next step after it lapses goes back to the key's own look") {
+        var flash = StateFlash()
+        _ = flash.apply([1: blue], states: [1: .init("a", .working)], now: at(0))
+        _ = flash.apply([1: orange], states: [1: .init("a", .awaiting)], now: at(500))
+        let during = flash.apply([1: orange], states: [1: .init("a", .awaiting)], now: at(700))
+        expectEqual(during[1], solid(orange), "still inside the flash")
+        let after = flash.apply([1: orange], states: [1: .init("a", .awaiting)], now: at(860))
+        expectEqual(after[1], orange)
+        expect(flash.until == nil)
+    }
+
+    test("flash: keys that change together share one flash") {
+        var flash = StateFlash()
+        _ = flash.apply([1: blue, 2: blue, 3: blue],
+                        states: [1: .init("a", .working), 2: .init("b", .working), 3: .init("c", .working)], now: at(0))
+        let out = flash.apply([1: orange, 2: green, 3: blue],
+                              states: [1: .init("a", .awaiting), 2: .init("b", .done), 3: .init("c", .working)], now: at(100))
+        expectEqual(out[1], solid(orange))
+        expectEqual(out[2], solid(green))
+        expectEqual(out[3], blue)
+        expectEqual(flash.until, at(450), "one deadline for both")
+        let back = flash.apply([1: orange, 2: green, 3: blue],
+                               states: [1: .init("a", .awaiting), 2: .init("b", .done), 3: .init("c", .working)], now: at(460))
+        expectEqual(back, [1: orange, 2: green, 3: blue])
+    }
+
+    test("flash: nothing on the first paint, on a new session in the key, or on a dark key") {
+        var flash = StateFlash()
+        let first = flash.apply([1: blue], states: [1: .init("a", .working)], now: at(0))
+        expectEqual(first[1], blue, "launch: nothing changed, it was never seen")
+        // A workspace switch puts another session on the key: the cascade owns that.
+        let swapped = flash.apply([1: orange], states: [1: .init("x", .awaiting)], now: at(100))
+        expectEqual(swapped[1], orange)
+        let ended = flash.apply([1: .off], states: [1: .init("x", .ended)], now: at(200))
+        expectEqual(ended[1], .off, "a dark key stays dark")
+    }
+
+    test("animation speed: fast by default, and it scales effect speed without passing 1") {
+        expectEqual(Preferences.default.animationSpeed, .fast)
+        expectEqual(AnimationSpeed.normal.look(blue), blue)
+        let fast = AnimationSpeed.fast.look(blue)
+        expect(abs(fast.speed - blue.speed * AnimationSpeed.fast.factor) < 1e-9, "\(fast.speed)")
+        expectEqual(fast.color, blue.color)
+        expectEqual(fast.brightness, blue.brightness)
+        expectEqual(AnimationSpeed.veryFast.look(orange).speed, 1, "clamped to the device's range")
+        expect(AnimationSpeed.fast.factor > 1)
+        expect(AnimationSpeed.veryFast.factor > AnimationSpeed.fast.factor)
+    }
+
+    test("animation speed: with speeds already high it clamps at 1, and the flash still shows") {
+        let high = Appearance(color: RGB(0x0C47E9), effect: .shallowBreath, brightness: 0.75, speed: 0.8)
+        for speed in AnimationSpeed.allCases {
+            let painted = speed.look(high)
+            expect(painted.speed <= 1, "\(speed): \(painted.speed)")
+            expect(painted.speed >= high.speed, "\(speed) never slows it")
+        }
+        expectEqual(AnimationSpeed.fast.look(high).speed, 1)
+        var flash = StateFlash()
+        let fast = AnimationSpeed.fast.look(high)
+        _ = flash.apply([1: fast], states: [1: .init("a", .idle)], now: at(0))
+        let out = flash.apply([1: fast], states: [1: .init("a", .working)], now: at(100))
+        expectEqual(out[1], solid(fast), "solid 1.0 whatever the configured speed")
+        let question = try Harness.require(Shows.show(named: "question"))
+        let paced = Shows.paced(question, speed: .fast)
+        expect(paced.duration < question.duration, "the lap is shorter even when its speed clamps")
+        for step in paced.steps { expect(step.side.s <= 1) }
+    }
+
+    test("animation speed: the ring's laps get shorter in proportion, the others do not") {
+        for name in ["completion", "question", "error"] {
+            let show = try Harness.require(Shows.show(named: name))
+            let paced = Shows.paced(show, speed: .fast)
+            let expected = show.duration.seconds / AnimationSpeed.fast.factor
+            // Each step rounds to a whole millisecond.
+            expect(abs(paced.duration.seconds - expected) < 0.001 * Double(show.steps.count), "\(name) \(paced.duration.seconds) vs \(expected)")
+            expectEqual(Shows.paced(show, speed: .normal).duration, show.duration, name)
+        }
+        let sweep = Shows.workspaceSweep(color: RGB(0x00FF00), settings: settings)
+        expect(Shows.paced(sweep, speed: .veryFast).duration < sweep.duration, "workspace sweep")
+        let rainbow = try Harness.require(Shows.show(named: "rainbow"))
+        expectEqual(Shows.paced(rainbow, speed: .veryFast).duration, rainbow.duration, "picked by hand: untouched")
+        let confirm = Shows.confirm(color: RGB(0xFFB000), effect: .breath, brightness: 1, milliseconds: 3000)
+        expectEqual(Shows.paced(confirm, speed: .veryFast).duration, confirm.duration, "tied to the confirm window")
+    }
 }

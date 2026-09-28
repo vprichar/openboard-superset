@@ -61,6 +61,10 @@ este fork sí.
 - **Atajos con repetición** (por ejemplo, Escape ×2 en una sola pulsación).
 - **Micrófono que funciona de verdad**: mantiene la tecla de dictado configurada, con
   autorrepetición como un teclado real.
+- **Responder preguntas solo con el pad (modo pregunta)**: cuando una sesión visible te pregunta
+  algo, el joystick manda flechas, el dial se mueve entre opciones (clic = Espacio para marcar,
+  mantener = Tab), APPR/REJ responden a esa sesión y FAST/CODEX se desactivan para no aprobar
+  ni cancelar por accidente. Se apaga solo al responder.
 - **Seguridad**: bloquea snippets peligrosos (`/clear`, `/exit`…), no manda ⏎ a ciegas tras un
   snippet, y al arrancar no se fía de las luces guardadas hasta confirmarlas.
 
@@ -74,6 +78,8 @@ este fork sí.
 - **Temas propios**: guardar, duplicar, renombrar, borrar, importar y exportar en JSON
   ([formato](docs/teclado/formato-temas.md)).
 - Al elegir un tema, el teclado lo muestra unos segundos antes de aplicarlo.
+- **Luces rápidas**: destello a brillo completo al cambiar de estado, animaciones del borde más
+  cortas y velocidad ajustable (normal, rápido, muy rápido).
 - [**Diseñador de paletas**](docs/teclado/disenador-paletas.html): una página para diseñar un tema
   sobre el dibujo del teclado, con las reglas marcadas en vivo, y exportarlo.
 

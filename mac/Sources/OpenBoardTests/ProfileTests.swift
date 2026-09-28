@@ -195,6 +195,211 @@ func runProfileResolutionTests() {
             expectEqual(ProfileResolver.resolve(.action("ACT06"), .tap, frontBundleID: front, prefs: prefs).action, .shortcut)
         }
     }
+
+    // Question mode: while a session the pad is showing waits on a prompt, the stick
+    // answers it — plain arrows — instead of switching Superset's tabs and workspaces.
+    let alive: (Int?) -> Bool = { _ in true }
+    let mine = "11111111-1111-4111-8111-111111111111"
+    let theirs = "22222222-2222-4222-8222-222222222222"
+
+    func board(_ sessions: [(id: String, workspace: String)]) -> SessionRegistry {
+        var registry = SessionRegistry()
+        for (index, session) in sessions.enumerated() {
+            _ = registry.claim(sessionID: session.id, cwd: nil, pid: index + 1, state: .working, isAlive: alive)
+            registry.enrich(sessionID: session.id, supersetWorkspaceID: session.workspace)
+        }
+        return registry
+    }
+
+    func questionMode(_ registry: SessionRegistry, workspace: String? = nil) -> Bool {
+        let view = PadView.compose(entries: registry.entries, context: .superset(workspaceID: workspace ?? mine))
+        return QuestionMode.isActive(entries: registry.entries, padKeys: view.keys, overflowKey: view.overflowKey)
+    }
+
+    let arrows: [Joystick.Direction: KeyAction] = [
+        .up: .arrowUp, .down: .arrowDown, .left: .arrowLeft, .right: .arrowRight,
+    ]
+
+    test("question mode: a visible session awaiting turns the stick into plain arrows, Superset in front") {
+        var registry = board([("a", mine), ("b", mine)])
+        registry.setState(sessionID: "b", to: .awaiting, pendingTool: "AskUserQuestion")
+        let active = questionMode(registry)
+        expect(active, "b is on key 2 of the workspace in front")
+        for (direction, arrow) in arrows {
+            let r = ProfileResolver.resolve(
+                .joystick(direction), .tap, frontBundleID: superset, prefs: prefs, questionMode: active
+            )
+            expectEqual(r.action, arrow, "\(direction)")
+            expectEqual(r.payloadKey, "JOY.\(direction.rawValue)", "no @bundle: no ⌥⌘ chord to find")
+            expect(ProfileResolver.shortcut(forPayloadKey: r.payloadKey, prefs: prefs) == nil, "\(direction)")
+        }
+    }
+
+    test("question mode: the trigger names the key, the workspace and the tool") {
+        var registry = board([("a", mine), ("b", mine)])
+        registry.setState(sessionID: "b", to: .awaiting, pendingTool: "Bash")
+        let view = PadView.compose(entries: registry.entries, context: .superset(workspaceID: mine))
+        let trigger = QuestionMode.trigger(entries: registry.entries, padKeys: view.keys, overflowKey: view.overflowKey)
+        expectEqual(trigger, QuestionMode.Trigger(key: 2, sessionID: "b", workspaceID: mine, pendingTool: "Bash"))
+    }
+
+    test("question mode: nothing awaiting leaves the stick on Superset's profile") {
+        let registry = board([("a", mine), ("b", mine)])
+        let active = questionMode(registry)
+        expect(!active)
+        let r = ProfileResolver.resolve(.joystick(.right), .tap, frontBundleID: superset, prefs: prefs, questionMode: active)
+        expectEqual(r.action, .shortcut)
+        expectEqual(r.payloadKey, "JOY.right@\(superset)")
+        expectEqual(ProfileResolver.shortcut(forPayloadKey: r.payloadKey, prefs: prefs)?.modifiers, [.command, .option])
+    }
+
+    test("question mode: a session awaiting in another workspace does not turn it on") {
+        var registry = board([("a", mine), ("x", theirs)])
+        registry.setState(sessionID: "x", to: .awaiting, pendingTool: "AskUserQuestion")
+        // Lent to the last key as overflow, but its prompt is not in the terminal in
+        // front: arrows would land in the wrong tab.
+        let view = PadView.compose(entries: registry.entries, context: .superset(workspaceID: mine))
+        expectEqual(view.overflowKey, BoardLayout.slotCount)
+        expect(!questionMode(registry), "another workspace's prompt")
+        expect(questionMode(registry, workspace: theirs), "but in its own workspace it is on")
+    }
+
+    test("question mode: back to working gives the profile back") {
+        var registry = board([("a", mine)])
+        registry.setState(sessionID: "a", to: .awaiting, pendingTool: "AskUserQuestion")
+        expect(questionMode(registry))
+        registry.setState(sessionID: "a", to: .working)
+        let active = questionMode(registry)
+        expect(!active, "answered")
+        let r = ProfileResolver.resolve(.joystick(.up), .tap, frontBundleID: superset, prefs: prefs, questionMode: active)
+        expectEqual(r.action, .shortcut)
+        expectEqual(r.payloadKey, "JOY.up@\(superset)")
+    }
+
+    test("question mode: the resolver only changes the stick — the dial and caps are routed by QuestionMode") {
+        for control in [PadControl.encoderLong, .encoderClick, .action("ACT09"), .action("ACT11")] {
+            for gesture in [Gesture.tap, .hold] {
+                expectEqual(
+                    ProfileResolver.resolve(control, gesture, frontBundleID: superset, prefs: prefs, questionMode: true),
+                    ProfileResolver.resolve(control, gesture, frontBundleID: superset, prefs: prefs),
+                    "\(control) \(gesture)"
+                )
+            }
+        }
+    }
+
+    // The full question-mode map: what each control does while a prompt is waiting,
+    // on top of the stick's arrows.
+
+    test("question mode: FAST and CODEX are ignored, tap and hold") {
+        for cap in ["ACT06", "ACT12"] {
+            expect(QuestionMode.ignores(cap: cap, active: true), "\(cap) in question mode")
+            expect(!QuestionMode.ignores(cap: cap, active: false), "\(cap) outside it")
+        }
+        expectEqual(QuestionMode.ignoredLogLine(cap: "ACT06"), "key ACT06: ignored in question mode")
+    }
+
+    test("question mode: every other cap keeps working — APPR, REJ, BRANCH, MIC, NEW") {
+        for cap in ["ACT07", "ACT08", "ACT09", "ACT10", "ACT11"] {
+            expect(!QuestionMode.ignores(cap: cap, active: true), cap)
+        }
+    }
+
+    test("question mode: turning the dial sends one arrow per detent") {
+        expectEqual(QuestionMode.dial(.turn(lines: 3), pendingTool: "AskUserQuestion"), .arrow(.up))
+        expectEqual(QuestionMode.dial(.turn(lines: -3), pendingTool: "AskUserQuestion"), .arrow(.down))
+        expectEqual(QuestionMode.dial(.turn(lines: 1), pendingTool: nil), .arrow(.up), "not multiplied by scrollLines")
+        expectEqual(QuestionMode.dial(.turn(lines: -9), pendingTool: "Bash"), .arrow(.down))
+    }
+
+    test("question mode: with a plan waiting the dial keeps scrolling, to read it") {
+        expectEqual(QuestionMode.dial(.turn(lines: 3), pendingTool: "ExitPlanMode"), .profile)
+        expectEqual(QuestionMode.dial(.turn(lines: -3), pendingTool: "ExitPlanMode"), .profile)
+    }
+
+    test("question mode: dial click is Space, dial hold is Tab") {
+        for tool in [nil, "AskUserQuestion", "ExitPlanMode"] as [String?] {
+            expectEqual(QuestionMode.dial(.click, pendingTool: tool), .key(Shortcut(keyCode: 49, key: "Space")), "\(tool ?? "none")")
+            expectEqual(QuestionMode.dial(.hold, pendingTool: tool), .key(Shortcut(keyCode: 48, key: "⇥")), "\(tool ?? "none")")
+        }
+    }
+
+    test("question mode: APPR and REJ answer the trigger's session, not the one-waiting rule") {
+        let trigger = QuestionMode.Trigger(key: 2, sessionID: "b", workspaceID: mine, pendingTool: "AskUserQuestion")
+        expectEqual(QuestionMode.answerTarget(for: .approve, trigger: trigger), "b")
+        expectEqual(QuestionMode.answerTarget(for: .reject, trigger: trigger), "b")
+        expect(QuestionMode.answerTarget(for: .enter, trigger: trigger) == nil, "NEW's ⏎ is unconditional")
+        expect(QuestionMode.answerTarget(for: .approve, trigger: nil) == nil, "outside question mode: the old rule")
+    }
+
+    test("question mode: APPR does not turn it off — a multi-question prompt is still open") {
+        var registry = board([("a", mine), ("b", mine)])
+        registry.setState(sessionID: "a", to: .awaiting, pendingTool: "AskUserQuestion")
+        let view = PadView.compose(entries: registry.entries, context: .superset(workspaceID: mine))
+        let current = QuestionMode.next(
+            current: nil, entries: registry.entries, padKeys: view.keys, overflowKey: view.overflowKey
+        )
+        expectEqual(current?.sessionID, "a")
+        // APPR sent ⏎ to "a": the prompt moved to its next question and no hook arrived.
+        // Nothing the key did is an input here — only the hook's state is.
+        let after = QuestionMode.next(
+            current: current, entries: registry.entries, padKeys: view.keys, overflowKey: view.overflowKey
+        )
+        expectEqual(after, current)
+    }
+
+    test("question mode: it stays on its session while another one starts waiting") {
+        var registry = board([("a", mine), ("b", mine)])
+        registry.setState(sessionID: "b", to: .awaiting, pendingTool: "AskUserQuestion")
+        let view = PadView.compose(entries: registry.entries, context: .superset(workspaceID: mine))
+        let current = QuestionMode.next(
+            current: nil, entries: registry.entries, padKeys: view.keys, overflowKey: view.overflowKey
+        )
+        registry.setState(sessionID: "a", to: .awaiting, pendingTool: "Bash")
+        let after = QuestionMode.next(
+            current: current, entries: registry.entries, padKeys: view.keys, overflowKey: view.overflowKey
+        )
+        expectEqual(after?.sessionID, "b", "APPR must not move to a prompt the arrows never reached")
+    }
+
+    test("question mode: it goes off the moment the session works, finishes, ends or closes") {
+        func started() -> (SessionRegistry, PadView, QuestionMode.Trigger?) {
+            var registry = board([("a", mine)])
+            registry.setState(sessionID: "a", to: .awaiting, pendingTool: "AskUserQuestion")
+            let view = PadView.compose(entries: registry.entries, context: .superset(workspaceID: mine))
+            let trigger = QuestionMode.next(
+                current: nil, entries: registry.entries, padKeys: view.keys, overflowKey: view.overflowKey
+            )
+            return (registry, view, trigger)
+        }
+        for leave in [SessionState.working, .done, .ended] {
+            var (registry, view, current) = started()
+            expect(current != nil)
+            registry.setState(sessionID: "a", to: leave)
+            let after = QuestionMode.next(
+                current: current, entries: registry.entries, padKeys: view.keys, overflowKey: view.overflowKey
+            )
+            expect(after == nil, "\(leave)")
+        }
+        var (registry, view, current) = started()
+        _ = registry.release(sessionID: "a")
+        let after = QuestionMode.next(
+            current: current, entries: registry.entries, padKeys: view.keys, overflowKey: view.overflowKey
+        )
+        expect(after == nil, "closed")
+    }
+
+    test("question mode: a prompt restored from disk and never confirmed does not turn it on") {
+        var registry = board([("a", mine)])
+        registry.setState(sessionID: "a", to: .awaiting, pendingTool: "AskUserQuestion")
+        var entries = registry.entries
+        entries[0].isUnconfirmed = true
+        let view = PadView.compose(entries: entries, context: .superset(workspaceID: mine))
+        expect(
+            QuestionMode.trigger(entries: entries, padKeys: view.keys, overflowKey: view.overflowKey) == nil,
+            "a stale awaiting would send arrows into the chat prompt"
+        )
+    }
 }
 
 /**

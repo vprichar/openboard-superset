@@ -104,6 +104,8 @@ public struct Preferences: Equatable, Sendable {
     /// giving up on a prompt — a question with no good answer, about an event that
     /// should not happen. Off restores the old safety net at a fixed 15 minutes.
     public var holdAttention: Bool
+    /// How fast the state effects and the ring's laps move. See `AnimationSpeed`.
+    public var animationSpeed: AnimationSpeed
     public var maxHoldSeconds: Int
     /// Whether the voice keys drive dictation through the `voice:pushToTalk`
     /// keybinding chord (⌃Y) instead of tapping space. Space is overloaded — with
@@ -727,6 +729,7 @@ public struct Preferences: Equatable, Sendable {
         staleHours: Int,
         doneDecaySeconds: Int,
         holdAttention: Bool = true,
+        animationSpeed: AnimationSpeed = .default,
         maxHoldSeconds: Int,
         voiceChord: Bool = false,
         padScope: PadScope = .focusedWorkspace,
@@ -762,6 +765,7 @@ public struct Preferences: Equatable, Sendable {
         self.staleHours = staleHours
         self.doneDecaySeconds = doneDecaySeconds
         self.holdAttention = holdAttention
+        self.animationSpeed = animationSpeed
         self.maxHoldSeconds = maxHoldSeconds
         self.voiceChord = voiceChord
         self.padScope = padScope
@@ -1022,6 +1026,9 @@ extension Preferences {
         let oldDefault = 900
         if json["holdAttention"] == nil, let legacy = json["attentionTimeoutSeconds"] as? Int {
             result.holdAttention = legacy <= 0 || legacy == oldDefault
+        }
+        if let raw = json["animationSpeed"] as? String, let value = AnimationSpeed(rawValue: raw) {
+            result.animationSpeed = value
         }
         if let value = json["maxHoldSeconds"] as? Int { result.maxHoldSeconds = value }
         if let value = json["voiceChord"] as? Bool { result.voiceChord = value }
@@ -1316,6 +1323,7 @@ extension Preferences {
             "staleHours": staleHours,
             "doneDecaySeconds": doneDecaySeconds,
             "holdAttention": holdAttention,
+            "animationSpeed": animationSpeed.rawValue,
             "maxHoldSeconds": maxHoldSeconds,
             "voiceChord": voiceChord,
             "padScope": padScope.rawValue,

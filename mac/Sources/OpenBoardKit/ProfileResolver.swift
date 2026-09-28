@@ -36,6 +36,7 @@ public struct Resolved: Equatable, Sendable {
  names: absent inherits the base binding, present with `nil` unbinds in that app.
  Taps on action caps and the encoder click are never overridden; profiles cover the
  joystick, the encoder's long press and the caps' long presses (`AppProfile`).
+ `questionMode` outranks the profile for the joystick alone (`QuestionMode`).
  */
 public enum ProfileResolver {
     private static let bundleSeparator: Character = "@"
@@ -44,7 +45,8 @@ public enum ProfileResolver {
         _ control: PadControl,
         _ gesture: Gesture,
         frontBundleID: String?,
-        prefs: Preferences
+        prefs: Preferences,
+        questionMode: Bool = false
     ) -> Resolved {
         let bundle = frontBundleID.flatMap { prefs.profiles[$0] != nil ? $0 : nil }
         let profile = bundle.flatMap { prefs.profiles[$0] }
@@ -56,6 +58,13 @@ public enum ProfileResolver {
         switch (control, gesture) {
         case let (.joystick(direction), _):
             // The stick has no hold; both gestures mean the push.
+            if questionMode {
+                // A visible prompt is waiting (`QuestionMode`): bare arrows, whatever the
+                // app in front. The payload key carries no `@<bundle>`, so no per-app
+                // chord can come back through it.
+                let action = QuestionMode.action(for: direction)
+                return Resolved(action: action, payloadKey: "JOY.\(direction.rawValue)", source: .base)
+            }
             let payload = key("JOY.\(direction.rawValue)")
             if let bundle, let override = profile?.joystick[direction] {
                 return Resolved(action: override, payloadKey: payload, source: .profile(bundle))
