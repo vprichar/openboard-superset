@@ -65,6 +65,10 @@ este fork sí.
   algo, el joystick manda flechas, el dial se mueve entre opciones (clic = Espacio para marcar,
   mantener = Tab), APPR/REJ responden a esa sesión y FAST/CODEX se desactivan para no aprobar
   ni cancelar por accidente. Se apaga solo al responder.
+- **Sesiones siempre al día**: si una sesión se cierra de golpe su tecla se apaga en segundos; al
+  reanudarla (`--resume`) vuelve a su tecla con la terminal nueva; las sesiones lanzadas como
+  agente con nombre también tienen tecla; y APPR/REJ a una sesión de otro workspace esperan a que
+  Superset la muestre antes de responder.
 - **Seguridad**: bloquea snippets peligrosos (`/clear`, `/exit`…), no manda ⏎ a ciegas tras un
   snippet, y al arrancar no se fía de las luces guardadas hasta confirmarlas.
 

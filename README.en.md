@@ -60,6 +60,10 @@ envelope); this fork does.
   something, the joystick sends arrows, the dial moves between options (click = Space to tick,
   hold = Tab), APPR/REJ answer that session and FAST/CODEX are disabled so nothing is approved
   or cancelled by accident. It turns itself off once you answer.
+- **Sessions stay in sync**: a session that closes abruptly has its key go dark within seconds;
+  resuming it (`--resume`) brings it back to its key with the new terminal; sessions started as a
+  named agent get a key too; and APPR/REJ for a session in another workspace wait for Superset to
+  show it before answering.
 - **Safety**: blocks dangerous snippets (`/clear`, `/exit`…), never sends ⏎ blind right after a
   snippet, and at launch does not trust saved lights until they are confirmed.
 

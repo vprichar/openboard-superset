@@ -92,7 +92,7 @@ test("subagents never take a key") {
     expect(
         !Eligibility.evaluate(
             env: cliEnv,
-            payload: Eligibility.Payload(sessionID: "a", agentType: "Explore")
+            payload: Eligibility.Payload(sessionID: "a", agentID: "x", agentType: "Explore")
         ).eligible
     )
     expect(
@@ -139,12 +139,24 @@ test("the environment override wins, but cannot lock everything out") {
     expect(Eligibility.allowedEntrypoints(env: [:]) == Eligibility.defaultEntrypoints)
 }
 
+test("a main session run as a named agent keeps its key") {
+    // `claude --agent` (or a session a team lead launched as a named agent) tags every
+    // hook with `agent_type` but never `agent_id`: it is the session itself, in its
+    // own process and terminal, not a subagent inside another one. Treating the type
+    // alone as a subagent refused every hook and froze its key on idle.
+    let verdict = Eligibility.evaluate(
+        env: cliEnv,
+        payload: Eligibility.Payload(sessionID: "a", agentType: "general-purpose")
+    )
+    expect(verdict.eligible, "agent_type without agent_id is a main session")
+}
+
 test("a subagent of an embedded SDK client reports as a subagent") {
     // Both are true; the Node version checks subagent first and the more specific
     // answer is the more useful one. Pinned so a reordering is deliberate.
     let verdict = Eligibility.evaluate(
         env: cliEnv.merging(["CLAUDE_AGENT_SDK_CLIENT_APP": "x"]) { a, _ in a },
-        payload: Eligibility.Payload(sessionID: "a", agentType: "Explore")
+        payload: Eligibility.Payload(sessionID: "a", agentID: "x", agentType: "Explore")
     )
     expect(verdict.reason == .subagent)
 }

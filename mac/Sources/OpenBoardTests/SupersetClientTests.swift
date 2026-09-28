@@ -105,7 +105,7 @@ private let unauthorizedBody = """
 private let agentsListBody = """
 {"result":{"data":{"json":[\
 {"terminalId":"7f8e5859-8a3b-4979-ba3e-b2698dfbc835","workspaceId":"11111111-1111-4111-8111-111111111111",\
-"agentId":"claude","agentSessionId":"d683f20f-083c-49b9-a412-7642a4776d38","startedAt":1790439676649,\
+"agentId":"claude","agentSessionId":"99999999-9999-4999-8999-999999999999","startedAt":1790439676649,\
 "lastEventAt":1790544768218,"lastEventType":"Stop","account":{"agent":"claude","selection":null,\
 "credentialKind":"subscription","identity":"«identity»","email":"«email»","directory":"/Users/someone/.claude"},\
 "launchId":"4426-1790307058"},\

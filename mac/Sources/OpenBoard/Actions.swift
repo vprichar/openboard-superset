@@ -332,15 +332,12 @@ enum Actions {
        failure.
      */
     static func respond(_ decision: Decision, slots: [SlotView]) -> RespondOutcome {
-        // A restored, unconfirmed prompt is what the file said before a restart — it
-        // may have been answered since. ⏎ into it would answer something unseen (F1).
-        let pending = slots.filter { $0.state?.isAttention == true && !$0.isUnconfirmed }
-        guard !pending.isEmpty else { return .nothingPending }
-        guard pending.count == 1 else {
-            return .ambiguous(slots: pending.map(\.slot))
+        let target: SlotView
+        switch pendingPick(slots) {
+        case .none: return .nothingPending
+        case let .ambiguous(pending): return .ambiguous(slots: pending)
+        case let .one(pending): target = pending
         }
-
-        let target = pending[0]
         let raised = Focus.raise(target)
         guard case .raised = raised else {
             return .focusFailed(slot: target.slot, reason: "\(raised)")
@@ -356,6 +353,24 @@ enum Actions {
     }
 
     enum Decision: Equatable { case approve, reject }
+
+    enum PendingPick {
+        case none
+        case ambiguous([Int])
+        case one(SlotView)
+    }
+
+    /// Which session an answer would go to — exposed so the caller can learn its
+    /// workspace before anything is raised (a session in another Superset workspace
+    /// waits for that workspace to come forward; see `BoardController`).
+    static func pendingPick(_ slots: [SlotView]) -> PendingPick {
+        // A restored, unconfirmed prompt is what the file said before a restart — it
+        // may have been answered since. ⏎ into it would answer something unseen (F1).
+        let pending = slots.filter { $0.state?.isAttention == true && !$0.isUnconfirmed }
+        guard let first = pending.first else { return .none }
+        guard pending.count == 1 else { return .ambiguous(pending.map(\.slot)) }
+        return .one(first)
+    }
 
     /// Poll until the target session is actually in front, or give up.
     ///

@@ -640,7 +640,7 @@ func runHarnessTests() {
         expect(
             !Eligibility.evaluate(
                 env: [:],
-                payload: Eligibility.Payload(sessionID: "s1", agentType: "Explore"),
+                payload: Eligibility.Payload(sessionID: "s1", agentID: "x", agentType: "Explore"),
                 harness: "hermes"
             ).eligible
         )

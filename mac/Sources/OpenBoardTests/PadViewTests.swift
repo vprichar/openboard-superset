@@ -53,6 +53,22 @@ func runPadViewTests() {
                     [1: "m2", 2: "m3", 3: "m4"])
     }
 
+    test("an ended session holds no key, and the workspace's keys close up") {
+        // A session whose process died is ended by the liveness check but kept, so a
+        // resume can come back on it. Kept must not mean shown: a dark key in the
+        // middle of a workspace's run is a hole the pad promised not to have.
+        var registry = SessionRegistry()
+        add(&registry, "m1", pid: 1, workspace: frontend)
+        add(&registry, "m2", pid: 2, workspace: frontend)
+        add(&registry, "m3", pid: 3, workspace: frontend)
+        registry.markEnded(sessionID: "m1")
+        let context = BoardContext.superset(workspaceID: frontend)
+        expectEqual(PadView.compose(entries: registry.entries, context: context).keys,
+                    [1: "m2", 2: "m3"])
+        // The entry is still there, and still in the ring as ended.
+        expectEqual(registry.entry(forSession: "m1")?.state, .ended)
+    }
+
     test("a session waiting elsewhere borrows key 6") {
         // Hiding a prompt because it is in another workspace would be the board
         // failing at the one thing it is for.

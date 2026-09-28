@@ -33,6 +33,8 @@ final class BoardController: ObservableObject {
     private var registry = SessionRegistry()
     private var dispatcher = KeyDispatcher()
     private var reassertTask: Task<Void, Never>?
+    /// The `Liveness` sweep (`startLiveness`).
+    private var livenessTask: Task<Void, Never>?
     /// Holds the calibration legend on the keys while the capture sheet is open.
     private var calibrationTask: Task<Void, Never>?
     /// Fun mode, while it owns the pad.
@@ -862,11 +864,88 @@ final class BoardController: ObservableObject {
         }
         // Going to a workspace is the strongest word on which one you are in — ahead
         // of Superset's own attach, which follows a second later.
+        // A key whose process is gone leads to a tab with no session in it. Refuse
+        // with the amber blink and let the key go dark, rather than raise a ghost.
+        if let sessionID = view.sessionID,
+           case let .dead(ended) = registry.checkBeforeJump(sessionID: sessionID) {
+            Log.write("key: jump to \(describeKey(slot: slot)) refused — " + Liveness.endedLogLine(ended))
+            _ = play(show: Shows.refused(), priority: .confirm)
+            publish()
+            Task { await paint() }
+            return
+        }
         if let workspace = view.supersetWorkspaceID {
             noteSupersetSignal(.init(workspaceID: workspace, at: Date(), source: .jump))
         }
         let outcome = Focus.raise(view)
         Log.write("key: jump to \(describeKey(slot: slot)) -> \(outcome)")
+    }
+
+    /**
+     APPR/REJ for a session in another Superset workspace: raise it now, then send the
+     key only once Superset's attach says that workspace is in front.
+
+     `Actions.respond` confirms that Superset is the app in front, which the deep link
+     makes true at once — the switch itself lands later. Seen live: "approve sent to
+     key 6" on a borrowed key, and the prompt still open, because the ⏎ reached the
+     workspace being left. The wait suspends rather than sleeps, so the main actor
+     keeps serving hooks and keys while it runs.
+
+     Returns false when the ordinary path applies: nothing single pending, no
+     workspace, the workspace already in front, or no host database to confirm from.
+     */
+    private func respondAcrossWorkspaces(
+        _ decision: Actions.Decision, slots: [SlotView], action: KeyAction, key: String
+    ) -> Bool {
+        let pressedAt = Date()
+        guard case let .one(target) = Actions.pendingPick(slots),
+              let workspace = target.supersetWorkspaceID,
+              SupersetFocus.mustAwaitWorkspace(target: workspace, active: supersetFocus.winner?.workspaceID)
+        else { return false }
+        guard let db = openSupersetDB() else {
+            Log.write("respond: workspace \(workspace.prefix(8)) cannot be confirmed (no host.db) — answering as before")
+            return false
+        }
+        let raised = Focus.raise(target)
+        guard case .raised = raised else {
+            logRespond(.focusFailed(slot: target.slot, reason: "\(raised)"), action: action, key: key)
+            return true
+        }
+        Log.write("respond: waiting for workspace \(workspace.prefix(8)) to come forward")
+        Task { [weak self] in
+            let sent = await SupersetFocus.awaitWorkspace(
+                .init(workspaceID: workspace, since: pressedAt),
+                latestAttach: { db.latestAttach() },
+                sleep: { try? await Task.sleep(for: .seconds($0)) }
+            ) {
+                guard let self else { return }
+                self.logRespond(Actions.respond(decision, slots: slots), action: action, key: key)
+            }
+            guard !sent, let self else { return }
+            Log.write(SupersetFocus.didNotComeForwardLogLine(workspaceID: workspace))
+            _ = self.play(show: Shows.refused(), priority: .confirm)
+        }
+        return true
+    }
+
+    private func logRespond(_ outcome: Actions.RespondOutcome, action: KeyAction, key: String) {
+        switch outcome {
+        case let .sent(slot):
+            Log.write("key \(key): \(action.rawValue) sent to \(describeKey(slot: slot))")
+        case .nothingPending:
+            Log.write("key \(key): nothing is waiting")
+        case let .ambiguous(slots):
+            // Refusing is the feature. Guessing would answer a prompt the user
+            // never read.
+            Log.write(
+                "key \(key): refused — \(slots.map { describeKey(slot: $0) }.joined(separator: ", ")) "
+                    + "are all waiting; press one of those keys"
+            )
+        case let .focusFailed(slot, reason):
+            Log.write("key \(key): \(describeKey(slot: slot)) never came forward (\(reason)) — not sent")
+        case let .failed(detail):
+            Log.write("key \(key): \(detail)")
+        }
     }
 
     /// A press whose key is still down when it fires: an action cap can hold, the dial
@@ -914,24 +993,8 @@ final class BoardController: ObservableObject {
                 slots = slots.filter { $0.sessionID == target }
                 Log.write("key \(key): question mode — answering \(target.prefix(8))")
             }
-            let outcome = Actions.respond(decision, slots: slots)
-            switch outcome {
-            case let .sent(slot):
-                Log.write("key \(key): \(action.rawValue) sent to \(describeKey(slot: slot))")
-            case .nothingPending:
-                Log.write("key \(key): nothing is waiting")
-            case let .ambiguous(slots):
-                // Refusing is the feature. Guessing would answer a prompt the user
-                // never read.
-                Log.write(
-                    "key \(key): refused — \(slots.map { describeKey(slot: $0) }.joined(separator: ", ")) "
-                        + "are all waiting; press one of those keys"
-                )
-            case let .focusFailed(slot, reason):
-                Log.write("key \(key): \(describeKey(slot: slot)) never came forward (\(reason)) — not sent")
-            case let .failed(detail):
-                Log.write("key \(key): \(detail)")
-            }
+            if respondAcrossWorkspaces(decision, slots: slots, action: action, key: key) { return }
+            logRespond(Actions.respond(decision, slots: slots), action: action, key: key)
 
         case .snippet:
             let text = model.snippets[key]
@@ -2277,6 +2340,8 @@ final class BoardController: ObservableObject {
     func stop() {
         reassertTask?.cancel()
         reassertTask = nil
+        livenessTask?.cancel()
+        livenessTask = nil
         overflowWinkTask?.cancel()
         overflowWinkTask = nil
         // Before anything else: a key left logically down outlives this process and
@@ -2731,6 +2796,29 @@ final class BoardController: ObservableObject {
             ?? event.hookPPID.flatMap(Self.claudePID(fromAncestryOf:))
 
         /*
+         A known session speaking from another process or terminal has moved:
+         `claude --resume` in a new tab keeps the session id and changes everything
+         else. `enrich` only fills what is missing, so without this the entry kept the
+         old pid and terminal and a jump landed in the tab the session had left. An
+         entry the liveness check had ended comes back on its own key here.
+
+         The tty is only looked up when something moved: `ps` is not free, and hooks
+         arrive several times a minute per session.
+         */
+        if let known = registry.entry(forSession: sessionID),
+           Liveness.hasMoved(known, pid: hookPID, supersetTerminalID: event.supersetTerminalID),
+           let move = registry.relocate(
+               sessionID: sessionID,
+               pid: hookPID,
+               tty: hookPID.flatMap(Self.tty(forPID:)),
+               supersetTerminalID: event.supersetTerminalID,
+               supersetWorkspaceID: event.supersetWorkspaceID
+           ) {
+            Log.write(Liveness.movedLogLine(move))
+            publish()
+        }
+
+        /*
          A surface the board is not listening to gets no key.
 
          Placed here rather than in `Eligibility`, which is pure and answers from the
@@ -2834,7 +2922,10 @@ final class BoardController: ObservableObject {
         }
 
         if event.name == "SessionStart" {
-            let pid = event.environment["CLAUDE_PID"].flatMap(Int.init)
+            // `hookPID`, not `CLAUDE_PID` alone: Claude Code rarely exports it, and a
+            // session claimed without a pid can never be seen to die — its key stayed
+            // lit after its process was gone.
+            let pid = hookPID
             _ = registry.claim(
                 sessionID: sessionID,
                 cwd: event.cwd,
@@ -3021,9 +3112,41 @@ final class BoardController: ObservableObject {
         return raw.hasPrefix("/dev/") ? raw : "/dev/\(raw)"
     }
 
+    // MARK: - liveness
+
+    /**
+     End every session whose process is gone (`Liveness`), logging each one.
+
+     A process can die without `SessionEnd` — a closed window, a crash, a kill — and
+     until this ran every `Liveness.checkInterval` a dead session's key stayed lit
+     until its slot was needed or it went stale, and a press raised a tab with no
+     session in it. Returns whether anything ended.
+     */
+    @discardableResult
+    private func endGoneSessions() -> Bool {
+        let ended = registry.endGoneSessions()
+        guard !ended.isEmpty else { return false }
+        for entry in ended { Log.write(Liveness.endedLogLine(entry)) }
+        publish()
+        return true
+    }
+
+    /// Its own loop rather than the resident one: that one paints only while the pad
+    /// is present, and a dead session should go dark in the menu bar regardless.
+    private func startLiveness() {
+        livenessTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Liveness.checkInterval))
+                guard let self else { return }
+                if self.endGoneSessions() { await self.paint() }
+            }
+        }
+    }
+
     // MARK: - the resident loop
 
     private func startResident() {
+        startLiveness()
         reassertTask = Task { [weak self] in
             var wasPresent: Bool?
             while !Task.isCancelled {
@@ -3197,7 +3320,10 @@ final class BoardController: ObservableObject {
          — and was never called from anywhere. So a closed Terminal tab kept its key
          until the 12h stale window, and the header counted it as live.
          */
-        var boardChanged = registry.prune() > 0
+        // Ended rather than dropped (`prune` used to delete them): an ended entry is
+        // reclaimable, so it frees its key exactly as before, and a `--resume` of the
+        // same session can still come back on it (`relocate`).
+        var boardChanged = endGoneSessions()
         if registry.decay(
             doneAfter: TimeInterval(model.preferences.doneDecaySeconds),
             holdAttention: model.preferences.holdAttention

@@ -78,13 +78,16 @@ public enum Eligibility {
     ) -> Verdict {
         // Subagents first. Codex excludes these from slot eligibility too; a single
         // parallel fan-out would otherwise exhaust all six keys at once.
-        if let type = payload.agentType, !type.isEmpty {
-            return Verdict(eligible: false, reason: .subagent, detail: "agent_type=\(type)")
-        }
+        //
+        // `agent_id` is what marks a subagent: it is set only when the hook fires
+        // inside one. `agent_type` alone is not enough — a main session started as a
+        // named agent (`claude --agent`, or launched by a team lead) carries it on
+        // every hook while being its own process in its own terminal.
         if let id = payload.agentID, !id.isEmpty {
-            return Verdict(eligible: false, reason: .subagent, detail: "agent_id set")
+            let type = payload.agentType.map { " agent_type=\($0)" } ?? ""
+            return Verdict(eligible: false, reason: .subagent, detail: "agent_id set\(type)")
         }
-        if env["CLAUDE_AGENT_ID"] != nil || env["CLAUDE_AGENT_TYPE"] != nil {
+        if env["CLAUDE_AGENT_ID"] != nil {
             return Verdict(eligible: false, reason: .subagent, detail: "subagent environment")
         }
 

@@ -223,4 +223,101 @@ func runSupersetFocusTests() {
         expectEqual(reader.latestAttach()?.workspaceID, "ws")
         expectEqual(reader.terminalLiveness("t"), nil)
     }
+
+    workspaceArrivalChecks(base: base)
+}
+
+/**
+ APPR/REJ into a session in another workspace. The deep link brings Superset to the
+ front at once, but the workspace switch lands later: an ⏎ sent when Superset was merely
+ in front went into the workspace being left. Seen live — "approve sent to key 6" and
+ the prompt still open — so the key is held until Superset's own attach names the
+ session's workspace, and never sent if it does not.
+ */
+private func workspaceArrivalChecks(base: Date) {
+    func at(_ seconds: TimeInterval) -> Date { base.addingTimeInterval(seconds) }
+    let target = "other-workspace-ws"
+    let here = "feature-branch-ws"
+
+    test("arrival: the same workspace, or a session without one, does not wait") {
+        expect(!SupersetFocus.mustAwaitWorkspace(target: here, active: here))
+        expect(!SupersetFocus.mustAwaitWorkspace(target: nil, active: here))
+        expect(SupersetFocus.mustAwaitWorkspace(target: target, active: here))
+        expect(SupersetFocus.mustAwaitWorkspace(target: target, active: nil))
+    }
+
+    test("arrival: only an attach of that workspace, from this press on, confirms it") {
+        let wait = SupersetFocus.WorkspaceWait(workspaceID: target, since: at(0), timeout: 1.5)
+        // Superset in front but still on the old workspace: keep waiting.
+        expectEqual(wait.step(attach: .init(workspaceID: here, at: at(0.2), source: .attach), now: at(0.3)), .wait)
+        // An old attach of the target is not this switch.
+        expectEqual(wait.step(attach: .init(workspaceID: target, at: at(-30), source: .attach), now: at(0.3)), .wait)
+        expectEqual(wait.step(attach: nil, now: at(0.3)), .wait)
+        expectEqual(wait.step(attach: .init(workspaceID: target, at: at(0.4), source: .attach), now: at(0.5)), .send)
+        expectEqual(wait.step(attach: .init(workspaceID: here, at: at(0.2), source: .attach), now: at(1.6)), .giveUp)
+    }
+
+    test("arrival: the key is not sent until the attach confirms the workspace") {
+        let log = EventLog()
+        let clock = FakeClock(base)
+        // The attach names the target from the third read on.
+        let confirmed = blockingArrival {
+            await SupersetFocus.awaitWorkspace(
+                .init(workspaceID: target, since: base, timeout: 1.5), poll: 0.1,
+                now: { clock.now },
+                latestAttach: {
+                    log.events.append("read")
+                    let reads = log.events.filter { $0 == "read" }.count
+                    return reads >= 3
+                        ? .init(workspaceID: target, at: clock.now, source: .attach)
+                        : .init(workspaceID: here, at: base.addingTimeInterval(-5), source: .attach)
+                },
+                sleep: { clock.advance($0) }
+            ) {
+                log.events.append("send")
+            }
+        }
+        expect(confirmed)
+        expectEqual(log.events, ["read", "read", "read", "send"])
+    }
+
+    test("arrival: without a confirmation in time, nothing is sent") {
+        let log = EventLog()
+        let clock = FakeClock(base)
+        let confirmed = blockingArrival {
+            await SupersetFocus.awaitWorkspace(
+                .init(workspaceID: target, since: base, timeout: 1.5), poll: 0.1,
+                now: { clock.now },
+                latestAttach: {
+                    log.events.append("read")
+                    return .init(workspaceID: here, at: clock.now, source: .attach)
+                },
+                sleep: { clock.advance($0) }
+            ) {
+                log.events.append("send")
+            }
+        }
+        expect(!confirmed)
+        expect(!log.events.contains("send"), "the key must not reach a workspace that never came forward")
+        expect(clock.now <= base.addingTimeInterval(1.6), "bounded by the timeout")
+        expectEqual(
+            SupersetFocus.didNotComeForwardLogLine(workspaceID: target),
+            "respond: workspace other-wo did not come forward — not sent"
+        )
+    }
+}
+
+private final class EventLog: @unchecked Sendable { var events: [String] = [] }
+private final class FakeClock: @unchecked Sendable {
+    var now: Date
+    init(_ start: Date) { now = start }
+    func advance(_ seconds: TimeInterval) { now = now.addingTimeInterval(seconds) }
+}
+private final class ArrivalBox: @unchecked Sendable { var value = false }
+private func blockingArrival(_ body: @escaping @Sendable () async -> Bool) -> Bool {
+    let done = DispatchSemaphore(value: 0)
+    let box = ArrivalBox()
+    Task.detached { box.value = await body(); done.signal() }
+    _ = done.wait(timeout: .now() + 5)
+    return box.value
 }

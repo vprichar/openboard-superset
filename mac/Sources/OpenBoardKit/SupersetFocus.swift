@@ -110,6 +110,83 @@ public enum SupersetFocus {
     }
 }
 
+/**
+ Answering a prompt in another workspace.
+
+ The deep link brings Superset to the front at once; the workspace switch lands a
+ moment later. `Actions.respond` used to count "Superset is in front" as landed, so an
+ ⏎ pressed on a borrowed key went into the workspace being left — logged as sent, the
+ prompt still open. Superset's own attach (`SupersetHostDatabase.latestAttach`) is the
+ signal that the switch happened, so the key waits for it, briefly, and is not sent at
+ all if it never comes.
+ */
+extension SupersetFocus {
+    /// Whether answering this session has to wait for its workspace. A session with no
+    /// workspace, or in the one already in front, answers as before.
+    public static func mustAwaitWorkspace(target: String?, active: String?) -> Bool {
+        guard let target else { return false }
+        return target != active
+    }
+
+    public struct WorkspaceWait: Equatable, Sendable {
+        public enum Step: Equatable, Sendable { case send, wait, giveUp }
+
+        public let workspaceID: String
+        /// When the key was pressed. Only an attach from then on is this switch.
+        public let since: Date
+        public let timeout: TimeInterval
+        /// Superset stamps the attach with its own clock; a little slack keeps a switch
+        /// that landed just as the key went down from being missed.
+        public static let clockSlack: TimeInterval = 0.25
+
+        public init(workspaceID: String, since: Date, timeout: TimeInterval = 1.5) {
+            self.workspaceID = workspaceID
+            self.since = since
+            self.timeout = timeout
+        }
+
+        public func step(attach: Signal?, now: Date) -> Step {
+            if let attach, attach.workspaceID == workspaceID,
+               attach.at >= since.addingTimeInterval(-Self.clockSlack) {
+                return .send
+            }
+            return now.timeIntervalSince(since) >= timeout ? .giveUp : .wait
+        }
+    }
+
+    /**
+     Poll the attach until it names the workspace, then `send`; give up at the timeout
+     without sending. Suspends between reads rather than sleeping the thread, and runs
+     in the caller's isolation, so the main actor keeps serving while it waits.
+     Returns whether it sent.
+     */
+    public static func awaitWorkspace(
+        _ wait: WorkspaceWait,
+        poll: TimeInterval = 0.08,
+        now: () -> Date = Date.init,
+        latestAttach: () -> Signal?,
+        sleep: (TimeInterval) async -> Void,
+        isolation: isolated (any Actor)? = #isolation,
+        send: () -> Void
+    ) async -> Bool {
+        while true {
+            switch wait.step(attach: latestAttach(), now: now()) {
+            case .send:
+                send()
+                return true
+            case .giveUp:
+                return false
+            case .wait:
+                await sleep(poll)
+            }
+        }
+    }
+
+    public static func didNotComeForwardLogLine(workspaceID: String) -> String {
+        "respond: workspace \(workspaceID.prefix(8)) did not come forward — not sent"
+    }
+}
+
 /// What Superset's own table says about a terminal. Read-only evidence for the
 /// restore: a restored session whose terminal is disposed or ended is not coming back.
 public enum TerminalLiveness: String, Equatable, Sendable {

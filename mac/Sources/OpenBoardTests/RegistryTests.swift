@@ -12,6 +12,7 @@ import OpenBoardKit
 func runRegistryTests() {
     // F7 lives with the registry tests: keys → sessions → a terminal (no suite of its own).
     targetedControlChecks()
+    livenessChecks()
     let alwaysAlive: (Int?) -> Bool = { _ in true }
     let neverAlive: (Int?) -> Bool = { _ in false }
 
@@ -1194,4 +1195,139 @@ func targetedControlChecks() {
 
 extension RecordingHost {
     fileprivate func setSnapshot(_ text: String?) { snapshotText = text }
+}
+
+/**
+ Liveness and resume: a key must not outlive its process, and a resumed session must
+ follow its new process rather than keep pointing at the tab it left.
+
+ Both came from one live failure: a session whose process died without `SessionEnd`
+ kept an idle key that jumped to a tab with no Claude in it, and after
+ `claude --resume` in another terminal the entry kept the old terminal.
+ */
+private func livenessChecks() {
+    let alive: Set<Int> = [200]
+    let isAlive: (Int?) -> Bool = { pid in pid.map(alive.contains) ?? false }
+
+    test("liveness: a session whose process died is ended on the next check") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "dead-session", pid: 179, state: .idle, isAlive: { _ in true })
+        _ = registry.claim(sessionID: "live-session", pid: 200, state: .working, isAlive: { _ in true })
+        let ended = registry.endGoneSessions(isAlive: isAlive)
+        expectEqual(ended.map(\.sessionID), ["dead-session"])
+        expectEqual(ended.first?.pid, 179)
+        expectEqual(registry.entry(forSession: "dead-session")?.state, .ended)
+        expectEqual(registry.entry(forSession: "live-session")?.state, .working)
+        // A second sweep reports nothing new: an ended entry is not ended again.
+        expect(registry.endGoneSessions(isAlive: isAlive).isEmpty)
+        expectEqual(
+            ended.first.map(Liveness.endedLogLine),
+            "session dead-ses ended: process 179 is gone"
+        )
+    }
+
+    test("liveness: a session without a pid, or born on the bus, is left alone") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "no-pid", state: .idle, isAlive: { _ in true })
+        let change = LifecycleMapper.Change(terminalID: "t-bus", workspaceID: "ws", agent: "codex", state: .working)
+        _ = registry.applyBus(change, mayClaim: true, isAlive: { _ in true })
+        let before = registry
+        expect(registry.endGoneSessions(isAlive: { _ in false }).isEmpty)
+        expectEqual(registry, before)
+        expectEqual(registry.entry(forSession: "no-pid")?.state, .idle)
+        expectEqual(registry.entry(forTerminal: "t-bus")?.state, .working)
+    }
+
+    test("resume: a hook from another pid adopts the new pid, tty and terminal") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "abc12345-resumed", pid: 179, tty: "/dev/ttys009", state: .idle, isAlive: { _ in true })
+        registry.enrich(sessionID: "abc12345-resumed", supersetWorkspaceID: "ws-old", supersetTerminalID: "aaaa1111-old")
+        let move = registry.relocate(
+            sessionID: "abc12345-resumed", pid: 58721, tty: "/dev/ttys004",
+            supersetTerminalID: "bbbb2222-new", supersetWorkspaceID: "ws-new"
+        )
+        expect(move != nil)
+        let entry = registry.entry(forSession: "abc12345-resumed")
+        expectEqual(entry?.pid, 58721)
+        expectEqual(entry?.tty, "/dev/ttys004")
+        expectEqual(entry?.supersetTerminalID, "bbbb2222-new")
+        expectEqual(entry?.supersetWorkspaceID, "ws-new")
+        expectEqual(entry?.slot, 1)
+        expectEqual(
+            move.map(Liveness.movedLogLine),
+            "session abc12345 moved: pid 179 → 58721, terminal aaaa1111 → bbbb2222"
+        )
+    }
+
+    test("resume: a new terminal alone is adopted even when the pid is unchanged") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "same-pid", pid: 200, state: .idle, isAlive: { _ in true })
+        registry.enrich(sessionID: "same-pid", supersetTerminalID: "term-old")
+        expect(registry.relocate(sessionID: "same-pid", pid: 200, tty: nil, supersetTerminalID: "term-new") != nil)
+        expectEqual(registry.entry(forSession: "same-pid")?.supersetTerminalID, "term-new")
+        expectEqual(registry.entry(forSession: "same-pid")?.pid, 200)
+    }
+
+    test("resume: the same pid and terminal, or a missing value, is not a move") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "steady", pid: 200, tty: "/dev/ttys001", state: .working, isAlive: { _ in true })
+        registry.enrich(sessionID: "steady", supersetTerminalID: "term")
+        let before = registry
+        expect(registry.relocate(sessionID: "steady", pid: 200, tty: "/dev/ttys001", supersetTerminalID: "term") == nil)
+        expect(registry.relocate(sessionID: "steady", pid: nil, tty: nil, supersetTerminalID: nil) == nil)
+        expect(registry.relocate(sessionID: "unknown", pid: 1, tty: nil, supersetTerminalID: "x") == nil)
+        expectEqual(registry, before)
+    }
+
+    test("resume: an ended session that comes back from another pid revives on its key") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "a-first", pid: 200, state: .idle, isAlive: { _ in true })
+        _ = registry.claim(sessionID: "b-ghost", pid: 179, state: .done, isAlive: { _ in true })
+        _ = registry.endGoneSessions(isAlive: isAlive)
+        expectEqual(registry.entry(forSession: "b-ghost")?.state, .ended)
+        let move = registry.relocate(sessionID: "b-ghost", pid: 58721, tty: "/dev/ttys004", supersetTerminalID: nil)
+        expectEqual(move?.revived, true)
+        let entry = registry.entry(forSession: "b-ghost")
+        expect(entry?.state != .ended, "the key lights again")
+        expectEqual(entry?.slot, 2, "on the key it had")
+        expectEqual(entry?.pid, 58721)
+        // The next check sees the new, live process and leaves it alone.
+        expect(registry.endGoneSessions(isAlive: { $0 == 58721 || $0 == 200 }).isEmpty)
+    }
+
+    test("jump: a session whose process is dead is not raised and is ended") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "ghost-key", pid: 179, state: .idle, isAlive: { _ in true })
+        _ = registry.claim(sessionID: "live-key", pid: 200, state: .idle, isAlive: { _ in true })
+        guard case let .dead(ended) = registry.checkBeforeJump(sessionID: "ghost-key", isAlive: isAlive) else {
+            expect(false, "a dead process must refuse the jump")
+            return
+        }
+        expectEqual(ended.pid, 179)
+        expectEqual(registry.entry(forSession: "ghost-key")?.state, .ended)
+        expectEqual(registry.checkBeforeJump(sessionID: "live-key", isAlive: isAlive), .go)
+        expectEqual(registry.entry(forSession: "live-key")?.state, .idle)
+    }
+
+    test("jump: no pid or a bus session is raised as before") {
+        var registry = SessionRegistry()
+        _ = registry.claim(sessionID: "no-pid", state: .idle, isAlive: { _ in true })
+        expectEqual(registry.checkBeforeJump(sessionID: "no-pid", isAlive: { _ in false }), .go)
+        expectEqual(registry.entry(forSession: "no-pid")?.state, .idle)
+    }
+
+    test("liveness: a slot ended by the check is still taken by the next new session") {
+        // Ended instead of dropped must not cost a key: a full board with one ended
+        // entry gives that slot to a newcomer rather than evicting a live session.
+        var registry = SessionRegistry()
+        for n in 1...6 {
+            _ = registry.claim(sessionID: "s\(n)", pid: 100 + n, state: .working, isAlive: { _ in true })
+        }
+        _ = registry.endGoneSessions(isAlive: { $0 != 103 })
+        expectEqual(registry.entry(forSession: "s3")?.state, .ended)
+        let newcomer = registry.claim(sessionID: "fresh", pid: 200, isAlive: { $0 != 103 })
+        expectEqual(newcomer.mode, .reclaimed)
+        expectEqual(newcomer.entry?.slot, 3)
+        expectEqual(registry.entries.count, 6)
+    }
 }

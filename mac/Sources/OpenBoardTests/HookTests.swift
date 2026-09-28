@@ -96,6 +96,7 @@ func runHookTests() {
             _ = send([
                 "hook_event_name": "SessionStart",
                 "session_id": "subagent",
+                "agent_id": "a1",
                 "agent_type": "Explore",
                 "env": ["CLAUDE_CODE_ENTRYPOINT": "cli"],
             ], to: path)

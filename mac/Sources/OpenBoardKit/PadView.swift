@@ -22,7 +22,8 @@ public enum BoardContext: Equatable, Sendable {
 
  - `.all` is exactly `occupancy()`: key N is registry slot N, holes included.
  - `.superset(W)` shows W's sessions packed onto keys 1…n, no holes, sorted by
-   `boardOrder` — so a `/clear` stays put and a newcomer goes last.
+   `boardOrder` — so a `/clear` stays put and a newcomer goes last. An `ended` session
+   is not shown, so the rest close up over it.
  - **Overflow.** With a key to spare, the last key borrows the most urgent session
    from anywhere else — but only one asking for something (`awaiting`) or broken
    (`error`). A prompt hidden because it is in another workspace is the board failing
@@ -97,8 +98,10 @@ public struct PadView: Equatable, Sendable {
         let byOrder = { (a: SessionRegistry.Entry, b: SessionRegistry.Entry) in
             (a.boardOrder, a.claimSeq) < (b.boardOrder, b.claimSeq)
         }
+        // An ended session keeps its entry (a resume can come back on it) but not a
+        // key: a dark key in the middle of the run is the hole packing exists to avoid.
         let own = entries
-            .filter { workspace(of: $0, worktrees: worktrees) == workspaceID }
+            .filter { $0.state != .ended && workspace(of: $0, worktrees: worktrees) == workspaceID }
             .sorted(by: byOrder)
         for (index, entry) in own.prefix(capacity).enumerated() {
             view.keys[index + 1] = entry.sessionID
